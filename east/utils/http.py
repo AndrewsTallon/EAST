@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = 30
 MAX_RETRIES = 3
-BACKOFF_FACTOR = 2
 
 # Browser-like headers to avoid being blocked by WAFs/APIs
 DEFAULT_HEADERS = {
@@ -26,8 +25,21 @@ DEFAULT_HEADERS = {
 # HTTP status codes that should NOT be retried (client errors)
 NO_RETRY_STATUSES = {400, 401, 403, 404, 405, 406, 410, 422}
 
-# Status codes that indicate rate limiting — retry with longer backoff
+# Status codes that indicate rate limiting / overload — retry with heavy backoff
 RATE_LIMIT_STATUSES = {429, 529}
+
+# Backoff schedules (seconds)
+# Standard server errors: 2s, 4s, 8s
+STANDARD_BACKOFF = [2, 4, 8]
+# Rate-limit / overload (429, 529): 5s, 15s, 45s
+RATE_LIMIT_BACKOFF = [5, 15, 45]
+
+
+def _get_wait(backoff_schedule: list[int], attempt: int) -> int:
+    """Return wait time from a backoff schedule, clamping to last value."""
+    if attempt < len(backoff_schedule):
+        return backoff_schedule[attempt]
+    return backoff_schedule[-1]
 
 
 def make_request(
@@ -43,8 +55,8 @@ def make_request(
 
     Retry behaviour:
     - 4xx (except 429): NO retry, return None immediately
-    - 429 / 529: retry with longer backoff (rate-limit / overloaded)
-    - 5xx: retry with standard backoff
+    - 429 / 529: retry with heavy backoff (5s → 15s → 45s)
+    - 5xx: retry with standard backoff (2s → 4s → 8s)
     - Connection / timeout errors: retry with standard backoff
     """
     merged_headers = dict(DEFAULT_HEADERS)
@@ -68,17 +80,16 @@ def make_request(
 
             status = response.status_code
 
-            # Rate-limited or overloaded — retry with longer wait
+            # Rate-limited or overloaded — retry with heavy backoff
             if status in RATE_LIMIT_STATUSES:
                 if attempt < retries:
-                    # Use Retry-After header if present, else exponential backoff * 3
                     retry_after = response.headers.get("Retry-After")
                     if retry_after and retry_after.isdigit():
                         wait_time = int(retry_after)
                     else:
-                        wait_time = (BACKOFF_FACTOR ** attempt) * 3
+                        wait_time = _get_wait(RATE_LIMIT_BACKOFF, attempt)
                     logger.warning(
-                        "Rate limited by %s (HTTP %d, attempt %d/%d). "
+                        "Rate limited / overloaded at %s (HTTP %d, attempt %d/%d). "
                         "Retrying in %ds...",
                         url, status, attempt + 1, retries + 1, wait_time,
                     )
@@ -86,7 +97,7 @@ def make_request(
                     continue
                 else:
                     logger.error(
-                        "Rate limited by %s (HTTP %d) after %d attempts.",
+                        "Rate limited / overloaded at %s (HTTP %d) after %d attempts.",
                         url, status, retries + 1,
                     )
                     return None
@@ -98,9 +109,9 @@ def make_request(
                 )
                 return None
 
-            # Other server errors (5xx) — retry
+            # Other server errors (5xx) — retry with standard backoff
             if attempt < retries:
-                wait_time = BACKOFF_FACTOR ** attempt
+                wait_time = _get_wait(STANDARD_BACKOFF, attempt)
                 logger.warning(
                     "Server error from %s (HTTP %d, attempt %d/%d). "
                     "Retrying in %ds...",
@@ -116,7 +127,7 @@ def make_request(
 
         except requests.exceptions.Timeout:
             if attempt < retries:
-                wait_time = BACKOFF_FACTOR ** attempt
+                wait_time = _get_wait(STANDARD_BACKOFF, attempt)
                 logger.warning(
                     "Timeout reaching %s (attempt %d/%d). Retrying in %ds...",
                     url, attempt + 1, retries + 1, wait_time,
@@ -128,7 +139,7 @@ def make_request(
 
         except requests.exceptions.ConnectionError:
             if attempt < retries:
-                wait_time = BACKOFF_FACTOR ** attempt
+                wait_time = _get_wait(STANDARD_BACKOFF, attempt)
                 logger.warning(
                     "Connection error to %s (attempt %d/%d). Retrying in %ds...",
                     url, attempt + 1, retries + 1, wait_time,
@@ -198,9 +209,13 @@ def post_json(
 
 
 def check_api_health(url: str, timeout: int = 10) -> bool:
-    """Quick health check — returns True if the endpoint responds 2xx."""
+    """Quick health check — returns True if the endpoint responds 2xx.
+
+    A 429/529 is treated as 'alive but busy', so still returns True.
+    """
     try:
         resp = requests.get(url, headers=DEFAULT_HEADERS, timeout=timeout)
-        return resp.ok
+        # 2xx → healthy.  429/529 → service exists but throttled → still alive.
+        return resp.ok or resp.status_code in RATE_LIMIT_STATUSES
     except Exception:
         return False
