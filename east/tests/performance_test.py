@@ -1,18 +1,17 @@
 """Performance test runner using Lighthouse CLI or PageSpeed API."""
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from typing import Any
 
 from east.tests.base import TestResult, TestRunner
-from east.utils.http import get_json
-
-PAGESPEED_ENDPOINT = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
 
 
 class PerformanceTestRunner(TestRunner):
-    """Measure web performance with Lighthouse (local) or PageSpeed API."""
+    """Measure web performance with local Lighthouse CLI."""
 
     name = "performance"
     description = "Web performance analysis via Lighthouse or PageSpeed"
@@ -23,47 +22,79 @@ class PerformanceTestRunner(TestRunner):
 
     def run(self) -> TestResult:
         try:
-            if self.pagespeed_key:
-                result = self._run_pagespeed_api()
-                if result is not None:
-                    return self._parse_pagespeed_result(result, source="PageSpeed API")
-
-            if shutil.which("lighthouse") is None:
-                return self._create_error_result(
-                    "Lighthouse CLI not found. Install Node.js + lighthouse (`npm i -g lighthouse`) "
-                    "or provide api_keys.google_pagespeed."
-                )
-
             return self._run_lighthouse_local()
         except Exception as exc:
             return self._create_error_result(str(exc))
 
-    def _run_pagespeed_api(self) -> dict[str, Any] | None:
-        params = {
-            "url": f"https://{self.domain}",
-            "strategy": "mobile",
-            "key": self.pagespeed_key,
-            "category": ["performance", "accessibility", "best-practices", "seo"],
-        }
-        return get_json(PAGESPEED_ENDPOINT, params=params, timeout=90, retries=2)
-
     def _run_lighthouse_local(self) -> TestResult:
-        cmd = [
-            "lighthouse",
-            f"https://{self.domain}",
-            "--quiet",
-            "--output=json",
-            "--output-path=stdout",
-            "--chrome-flags=--headless --no-sandbox --disable-dev-shm-usage",
-            "--only-categories=performance,accessibility,best-practices,seo",
-        ]
+        with tempfile.NamedTemporaryFile(prefix="east-lighthouse-", suffix=".json", delete=False) as tmp:
+            output_path = tmp.name
+
+        cmd = self._build_lighthouse_command(output_path)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
         if proc.returncode != 0:
             err = proc.stderr.strip() or proc.stdout.strip() or "Unknown lighthouse error"
             return self._create_error_result(f"Lighthouse failed: {err}")
 
-        payload = json.loads(proc.stdout)
+        if not os.path.exists(output_path):
+            return self._create_error_result(
+                "Lighthouse did not produce output JSON. Ensure Chrome/Chromium is installed and runnable."
+            )
+
+        with open(output_path, "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+
         return self._parse_lighthouse_result(payload, source="Lighthouse Local")
+
+    def _build_lighthouse_command(self, output_path: str) -> list[str]:
+        """Build cross-platform Lighthouse command with executable resolution."""
+        base_args = [
+            f"https://{self.domain}",
+            "--quiet",
+            "--output=json",
+            f"--output-path={output_path}",
+            "--chrome-flags=--headless --no-sandbox --disable-dev-shm-usage",
+            "--only-categories=performance,accessibility,best-practices,seo",
+        ]
+
+        if os.name != "nt":
+            lighthouse = shutil.which("lighthouse")
+            if lighthouse:
+                return [lighthouse, *base_args]
+
+            npx = shutil.which("npx")
+            if npx:
+                return [npx, "--yes", "lighthouse", *base_args]
+
+            raise RuntimeError(
+                "Node.js/npm was not found. Install Node.js LTS and Lighthouse (`npm i -g lighthouse`) "
+                "or ensure `npx` is available in PATH."
+            )
+
+        lighthouse_cmd = shutil.which("lighthouse.cmd") or shutil.which("lighthouse.bat") or shutil.which("lighthouse.exe")
+        if lighthouse_cmd:
+            return [lighthouse_cmd, *base_args]
+
+        npx_cmd = shutil.which("npx.cmd") or shutil.which("npx.exe") or shutil.which("npx.bat")
+        if npx_cmd:
+            return [npx_cmd, "--yes", "lighthouse", *base_args]
+
+        lighthouse_ps1 = shutil.which("lighthouse")
+        pwsh = shutil.which("pwsh") or shutil.which("powershell")
+        if lighthouse_ps1 and lighthouse_ps1.lower().endswith(".ps1") and pwsh:
+            return [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", lighthouse_ps1, *base_args]
+
+        node = shutil.which("node")
+        npm = shutil.which("npm") or shutil.which("npm.cmd")
+        if not node or not npm:
+            raise RuntimeError(
+                "Node.js/npm was not found. Install Node.js LTS, reopen terminal, and rerun EAST."
+            )
+
+        raise RuntimeError(
+            "Lighthouse CLI was not found as an executable shim. Install globally with `npm i -g lighthouse` "
+            "or run with npm available so EAST can use `npx` automatically."
+        )
 
     def _parse_lighthouse_result(self, payload: dict[str, Any], source: str) -> TestResult:
         categories = payload.get("categories", {})
@@ -103,10 +134,6 @@ class PerformanceTestRunner(TestRunner):
             ],
             recommendations=self._recommendations(overall),
         )
-
-    def _parse_pagespeed_result(self, payload: dict[str, Any], source: str) -> TestResult:
-        lighthouse = payload.get("lighthouseResult", {})
-        return self._parse_lighthouse_result(lighthouse, source=source)
 
     @staticmethod
     def _grade(score: int) -> str:

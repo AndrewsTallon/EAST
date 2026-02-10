@@ -43,6 +43,20 @@ Additional local tools for new tests:
 - `nmap` for open ports scanning (gracefully skipped with clear report/log error if unavailable)
 - Playwright browsers for screenshots: `playwright install chromium`
 
+### Windows note for Lighthouse
+
+On Windows, EAST resolves Lighthouse using executable shims automatically:
+
+- Prefers `lighthouse.cmd` / `.bat` / `.exe`
+- Falls back to `npx.cmd --yes lighthouse ...`
+- If only `lighthouse.ps1` is present, EAST uses `pwsh`/`powershell` with execution bypass
+
+Setup steps:
+
+1. Install Node.js LTS
+2. Install Lighthouse globally: `npm i -g lighthouse`
+3. Reopen PowerShell/terminal so PATH updates
+
 ## Usage
 
 ### Quick Scan

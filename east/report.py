@@ -4,7 +4,6 @@ import io
 import os
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any, Optional
 
 from docx import Document
@@ -18,7 +17,6 @@ from docx.oxml import parse_xml
 from east.config import EASTConfig
 from east.tests.base import TestResult
 from east.visuals.badges import COLORS, create_grade_badge, create_score_gauge, create_status_badge
-from east.visuals.charts import create_summary_dashboard
 from east.visuals.tables import (
     create_professional_table,
     create_status_table,
@@ -56,6 +54,9 @@ SEVERITY_LABELS = {
 
 class EASTReportGenerator:
     """Generates professional Word document reports for EAST scans."""
+
+    OVERVIEW_COLUMNS = 4
+    OVERVIEW_ICON_HEIGHT = Pt(10)
 
     def __init__(self, config: EASTConfig):
         self.config = config
@@ -143,11 +144,11 @@ class EASTReportGenerator:
 
         # Add logo if exists
         logo_path = self.config.branding.logo
-        if os.path.exists(logo_path):
+        if logo_path:
             p = self.document.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = p.add_run()
-            run.add_picture(logo_path, width=Inches(2.0))
+            self._safe_add_picture(run, logo_path, width=Inches(2.0), warning_context="cover logo")
 
         # Title
         p = self.document.add_paragraph()
@@ -260,31 +261,88 @@ class EASTReportGenerator:
         self._add_findings_summary()
 
     def _add_summary_dashboard(self):
-        """Add visual dashboard with scores for each domain."""
+        """Add a DOCX-native assessment overview grid for each domain."""
         self.document.add_heading("Assessment Overview", level=2)
 
         for domain, results in self.results.items():
-            scores = {}
-            for result in results:
-                if result.success and result.score is not None:
-                    scores[result.test_name] = {
-                        "score": result.score,
-                        "max": result.max_score,
-                        "grade": result.grade,
-                    }
+            overview_items = self._build_overview_items(results)
+            if not overview_items:
+                continue
 
-            if scores:
-                p = self.document.add_paragraph()
-                run = p.add_run(f"Domain: {domain}")
-                run.bold = True
-                run.font.size = Pt(12)
-                run.font.color.rgb = COLOR_HEADER
+            p = self.document.add_paragraph()
+            run = p.add_run(f"Domain: {domain}")
+            run.bold = True
+            run.font.size = Pt(12)
+            run.font.color.rgb = COLOR_HEADER
+            run.font.name = FONT_HEADING
 
-                dashboard_img = create_summary_dashboard(scores)
-                p = self.document.add_paragraph()
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                run = p.add_run()
-                run.add_picture(dashboard_img, width=Inches(5.5))
+            self._add_overview_table(overview_items)
+
+    def _build_overview_items(self, results: list[TestResult]) -> list[dict[str, Any]]:
+        """Build normalized overview entries for a domain."""
+        items: list[dict[str, Any]] = []
+        for result in results:
+            if result.success and result.score is not None:
+                items.append({
+                    "label": self._format_test_label(result.test_name),
+                    "badge": create_grade_badge(result.grade or "N/A", size=0.45),
+                })
+            elif not result.success:
+                items.append({
+                    "label": f"{self._format_test_label(result.test_name)} (ERROR)",
+                    "badge": create_status_badge("ERROR", status="critical", size=(1.0, 0.35)),
+                })
+
+        return items
+
+    def _add_overview_table(self, overview_items: list[dict[str, Any]]):
+        """Render assessment overview icons and labels in an inline table layout."""
+        columns = self.OVERVIEW_COLUMNS
+        rows = (len(overview_items) + columns - 1) // columns
+        table = self.document.add_table(rows=rows, cols=columns)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = True
+
+        for index, item in enumerate(overview_items):
+            row_idx = index // columns
+            col_idx = index % columns
+            cell = table.cell(row_idx, col_idx)
+            paragraph = cell.paragraphs[0]
+            paragraph.paragraph_format.space_before = Pt(1)
+            paragraph.paragraph_format.space_after = Pt(1)
+
+            badge_run = paragraph.add_run()
+            self._safe_add_picture(
+                badge_run,
+                item["badge"],
+                height=self.OVERVIEW_ICON_HEIGHT,
+                warning_context=f"overview badge for {item['label']}",
+            )
+
+            label_run = paragraph.add_run(f" {item['label']}")
+            label_run.font.name = FONT_BODY
+            label_run.font.size = Pt(10)
+            label_run.font.color.rgb = COLOR_BODY
+
+        self.document.add_paragraph()
+
+    @staticmethod
+    def _format_test_label(test_name: str) -> str:
+        """Map internal test names to concise overview labels."""
+        labels = {
+            "ssl_labs": "SSL/TLS",
+            "mozilla_observatory": "Observatory",
+            "dns_lookup": "DNS",
+            "email_auth": "Email Auth",
+            "blacklist": "Blacklist",
+            "subdomains": "Subdomains",
+            "security_headers": "Security Headers",
+            "performance": "Performance",
+            "cookies": "Cookies",
+            "open_ports": "Open Ports",
+            "screenshots": "Screenshots",
+        }
+        return labels.get(test_name, test_name.replace("_", " ").title())
 
     def _add_findings_summary(self):
         """Add a summary table of findings across all domains."""
@@ -519,20 +577,41 @@ class EASTReportGenerator:
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             for key in badge_gauge_keys:
                 buf = visuals[key]
-                buf.seek(0)
                 run = p.add_run()
                 width = Inches(1.8) if "badge" in key else Inches(2.5)
-                run.add_picture(buf, width=width)
+                self._safe_add_picture(run, buf, width=width, warning_context=f"visual {key}")
                 run.add_text("   ")  # spacing
 
         # Add charts
         for key in chart_keys:
             buf = visuals[key]
-            buf.seek(0)
             p = self.document.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = p.add_run()
-            run.add_picture(buf, width=Inches(5.0))
+            self._safe_add_picture(run, buf, width=Inches(5.0), warning_context=f"visual {key}")
+
+    def _safe_add_picture(
+        self,
+        run,
+        image_source: str | io.BytesIO,
+        *,
+        width=None,
+        height=None,
+        warning_context: str,
+    ) -> bool:
+        """Safely add an inline image and avoid breaking report generation."""
+        if isinstance(image_source, str) and not os.path.exists(image_source):
+            logger.warning("Skipping missing image (%s): %s", warning_context, image_source)
+            return False
+
+        try:
+            if hasattr(image_source, "seek"):
+                image_source.seek(0)
+            run.add_picture(image_source, width=width, height=height)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to insert image (%s): %s", warning_context, exc)
+            return False
 
     def _add_result_table(self, table_data: dict):
         """Add a table from test results."""
