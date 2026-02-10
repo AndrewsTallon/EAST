@@ -36,7 +36,10 @@ class MozillaObservatoryTestRunner(TestRunner):
                 SCAN_ENDPOINT,
                 params={"host": self.domain},
                 timeout=60,
-                retries=3,
+                retries=4,
+                overload_statuses={429, 502, 503, 529},
+                overload_backoff_schedule=[5, 15, 30, 60],
+                jitter=True,
             )
 
             if data is None:

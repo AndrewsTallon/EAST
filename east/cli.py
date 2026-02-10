@@ -4,6 +4,7 @@ import logging
 import os
 import sys
 import time
+import asyncio
 from datetime import datetime
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from rich.text import Text
 from east import __version__
 from east.config import EASTConfig
 from east.report import EASTReportGenerator
+from east.scan_engine import ScanEngine
 from east.tests.base import TestResult
 from east.utils.validators import validate_domain, sanitize_domain
 
@@ -39,6 +41,10 @@ def _register_tests():
     from east.tests.blacklist_test import BlacklistTestRunner
     from east.tests.subdomain_test import SubdomainTestRunner
     from east.tests.headers_test import SecurityHeadersTestRunner
+    from east.tests.performance_test import PerformanceTestRunner
+    from east.tests.cookies_test import CookiesTestRunner
+    from east.tests.open_ports_test import OpenPortsTestRunner
+    from east.tests.screenshot_test import ScreenshotTestRunner
 
     TEST_REGISTRY = {
         "ssl_labs": SSLLabsTestRunner,
@@ -51,6 +57,10 @@ def _register_tests():
         "blacklist": BlacklistTestRunner,
         "subdomains": SubdomainTestRunner,
         "security_headers": SecurityHeadersTestRunner,
+        "performance": PerformanceTestRunner,
+        "cookies": CookiesTestRunner,
+        "open_ports": OpenPortsTestRunner,
+        "screenshots": ScreenshotTestRunner,
     }
 
 
@@ -191,7 +201,6 @@ def _run_scan(config: EASTConfig, test_filter: list[str] | None, output: str, ve
     console.print(f"[bold]Output:[/bold] {output}\n")
 
     _register_tests()
-    all_results: dict[str, list[TestResult]] = {}
 
     # Validate SSL Labs email requirement before starting any scans
     if "ssl_labs" in tests_to_run and not config.ssllabs_email:
@@ -202,63 +211,15 @@ def _run_scan(config: EASTConfig, test_filter: list[str] | None, output: str, ve
         )
         sys.exit(1)
 
-    total_tasks = len(valid_domains) * len(tests_to_run)
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-        TimeElapsedColumn(),
-        console=console,
-    ) as progress:
-        overall = progress.add_task("Overall Progress", total=total_tasks)
-
-        for domain in valid_domains:
-            domain_results = []
-
-            for test_name in tests_to_run:
-                runner_cls = TEST_REGISTRY.get(test_name)
-                if runner_cls is None:
-                    continue
-
-                display_name = test_name.replace("_", " ").title()
-                task = progress.add_task(
-                    f"  {domain} - {display_name}...",
-                    total=None,
-                )
-
-                try:
-                    # Pass extra kwargs for runners that need them
-                    if test_name == "ssl_labs":
-                        runner = runner_cls(
-                            domain,
-                            email=config.ssllabs_email,
-                            use_cache=config.ssllabs_usecache,
-                        )
-                    else:
-                        runner = runner_cls(domain)
-                    result = runner.run()
-                    domain_results.append(result)
-
-                    if result.success:
-                        progress.update(task, description=f"  {domain} - {display_name} [green]Done[/green]")
-                    else:
-                        progress.update(task, description=f"  {domain} - {display_name} [yellow]Warning[/yellow]")
-                except Exception as e:
-                    console.print(f"  [red]Error running {test_name} on {domain}: {e}[/red]")
-                    domain_results.append(TestResult(
-                        test_name=test_name,
-                        domain=domain,
-                        success=False,
-                        error=str(e),
-                    ))
-                    progress.update(task, description=f"  {domain} - {display_name} [red]Error[/red]")
-
-                progress.update(overall, advance=1)
-                progress.remove_task(task)
-
-            all_results[domain] = domain_results
+    console.print("[dim]Running tests in asynchronous mode with safe per-service rate limits...[/dim]")
+    engine = ScanEngine(TEST_REGISTRY)
+    all_results = asyncio.run(
+        engine.run(
+            config,
+            tests_to_run,
+            on_log=lambda msg: logging.getLogger("east.scan").info(msg),
+        )
+    )
 
     # Print summary
     _print_results_summary(all_results)
@@ -379,6 +340,10 @@ def list_tests():
         "blacklist": "Domain/IP blacklist checking across major DNSBL providers",
         "subdomains": "Subdomain enumeration via Certificate Transparency logs",
         "security_headers": "Detailed HTTP security headers analysis",
+        "performance": "Web performance metrics via local Lighthouse or PageSpeed API",
+        "cookies": "Cookie security analysis (Secure, HttpOnly, SameSite)",
+        "open_ports": "Open ports discovery using nmap (top 100 TCP)",
+        "screenshots": "Full-page screenshot capture via Playwright",
     }
 
     for name, desc in test_descriptions.items():

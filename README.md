@@ -4,9 +4,11 @@ A professional security assessment tool that scans domains for externally visibl
 
 ## Features
 
-- **7 automated security tests** covering SSL/TLS, DNS, email authentication, blacklists, subdomains, and HTTP headers
+- **11 automated security tests** covering SSL/TLS, DNS, email auth, blacklists, subdomains, headers, performance, cookies, ports, and screenshots
 - **Professional .docx reports** with cover page, executive summary, visual charts, formatted tables, and appendix
-- **Rich CLI** with progress bars, color output, and scan summaries
+- **Rich CLI** with color output and scan summaries
+- **Async scan engine** shared across CLI and web UI with rate limiting for SSL Labs and Observatory
+- **FastAPI web UI** for local scans with per-job log streaming and DOCX download
 - **YAML configuration** for multi-domain scans with customizable test selection
 - **Visual output** including grade badges, score gauges, protocol charts, and status indicators
 
@@ -33,6 +35,13 @@ pip install -e .
   - `pyyaml` - Configuration
   - `click` - CLI interface
   - `rich` - Terminal output
+
+
+Additional local tools for new tests:
+
+- Node.js + Lighthouse CLI (`npm i -g lighthouse`) for local performance scans
+- `nmap` for open ports scanning (gracefully skipped with clear report/log error if unavailable)
+- Playwright browsers for screenshots: `playwright install chromium`
 
 ## Usage
 
@@ -64,6 +73,19 @@ python -m east.cli scan --domain example.com --tests dns_lookup,email_auth
 # SSL and security headers only
 python -m east.cli scan --domain example.com --tests ssl_labs,security_headers
 ```
+
+
+### Web UI (FastAPI)
+
+```bash
+# Start local web server
+uvicorn east.web.app:app --host 0.0.0.0 --port 8000
+
+# Open browser at
+# http://localhost:8000
+```
+
+The UI supports multi-domain scans by entering comma-separated domains and selecting tests.
 
 ### Other Commands
 
@@ -139,6 +161,10 @@ branding:
 | Blacklist Check | `blacklist` | IP and domain checked against 12 DNS-based blacklists (Spamhaus, SpamCop, Barracuda, etc.) |
 | Subdomain Enumeration | `subdomains` | Discovery via Certificate Transparency logs (crt.sh) and DNS brute force of 50 common prefixes |
 | Security Headers | `security_headers` | Analysis of 12 security headers and 4 information disclosure headers with weighted scoring |
+| Performance | `performance` | Lighthouse local performance categories (or optional Google PageSpeed API key) |
+| Cookies | `cookies` | Cookie attributes review for Secure, HttpOnly, and SameSite protections |
+| Open Ports | `open_ports` | nmap top-100 TCP scan with exposed service listing |
+| Screenshots | `screenshots` | Full-page web screenshot capture with Playwright |
 
 ## Report Output
 
@@ -171,7 +197,14 @@ east/
 │   ├── email_test.py        # SPF, DKIM, DMARC checks
 │   ├── blacklist_test.py    # DNSBL IP/domain checking
 │   ├── subdomain_test.py    # CT log + DNS brute force enumeration
-│   └── headers_test.py      # HTTP security headers analysis
+│   ├── headers_test.py      # HTTP security headers analysis
+│   ├── performance_test.py  # Lighthouse/PageSpeed performance checks
+│   ├── cookies_test.py      # Cookie security attribute analysis
+│   ├── open_ports_test.py   # nmap-based open ports scan
+│   └── screenshot_test.py   # Playwright screenshot capture
+├── web/
+│   └── app.py               # FastAPI web UI with SSE logs + report download
+├── scan_engine.py           # Shared async orchestrator for CLI + web
 ├── visuals/
 │   ├── badges.py            # Grade badges, score gauges, status indicators
 │   ├── charts.py            # Certificate timeline, protocol chart, dashboard
@@ -206,11 +239,12 @@ east/
 
 ### Not Yet Implemented (Phase 3 & 4)
 
-- [ ] Website performance testing (Google PageSpeed Insights API)
-- [ ] Cookie analysis (Secure, HttpOnly, SameSite flags)
-- [ ] Open ports scanning
-- [ ] Screenshot integration
-- [ ] Async/parallel test execution
+- [x] Website performance testing (Lighthouse local + optional Google PageSpeed Insights API key)
+- [x] Cookie analysis (Secure, HttpOnly, SameSite flags)
+- [x] Open ports scanning (nmap, graceful skip when missing)
+- [x] Screenshot integration (Playwright)
+- [x] Async/parallel test execution with rate limiting for SSL Labs + Observatory
+- [x] Local FastAPI web interface with SSE logs and report download
 - [ ] Logo/branding asset
 
 ## Notes
