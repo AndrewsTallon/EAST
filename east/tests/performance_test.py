@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import shlex
 from typing import Any
 
 from east.tests.base import TestResult, TestRunner
@@ -30,15 +31,22 @@ class PerformanceTestRunner(TestRunner):
         with tempfile.NamedTemporaryFile(prefix="east-lighthouse-", suffix=".json", delete=False) as tmp:
             output_path = tmp.name
 
-        cmd = self._build_lighthouse_command(output_path)
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        cmd, diag = self._build_lighthouse_command(output_path)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+        except Exception as exc:
+            return self._create_error_result(
+                f"Lighthouse failed to start: {exc}. {self._format_diagnostics(diag, cmd)}"
+            )
+
         if proc.returncode != 0:
             err = proc.stderr.strip() or proc.stdout.strip() or "Unknown lighthouse error"
-            return self._create_error_result(f"Lighthouse failed: {err}")
+            return self._create_error_result(f"Lighthouse failed: {err}. {self._format_diagnostics(diag, cmd)}")
 
         if not os.path.exists(output_path):
             return self._create_error_result(
-                "Lighthouse did not produce output JSON. Ensure Chrome/Chromium is installed and runnable."
+                "Lighthouse did not produce output JSON. Ensure Chrome/Chromium is installed and runnable. "
+                f"{self._format_diagnostics(diag, cmd)}"
             )
 
         with open(output_path, "r", encoding="utf-8") as fh:
@@ -46,25 +54,37 @@ class PerformanceTestRunner(TestRunner):
 
         return self._parse_lighthouse_result(payload, source="Lighthouse Local")
 
-    def _build_lighthouse_command(self, output_path: str) -> list[str]:
+    def _build_lighthouse_command(self, output_path: str) -> tuple[list[str], dict[str, Any]]:
         """Build cross-platform Lighthouse command with executable resolution."""
+        node = shutil.which("node")
+        npm = shutil.which("npm") or shutil.which("npm.cmd")
+        profile_base = self._prepare_profile_dir()
+
         base_args = [
             f"https://{self.domain}",
             "--quiet",
             "--output=json",
             f"--output-path={output_path}",
-            "--chrome-flags=--headless --no-sandbox --disable-dev-shm-usage",
+            f"--chrome-flags={self._build_chrome_flags(profile_base)}",
             "--only-categories=performance,accessibility,best-practices,seo",
         ]
+
+        diag = {
+            "node_detected": bool(node),
+            "npm_detected": bool(npm),
+            "profile_dir": str(profile_base),
+        }
 
         if os.name != "nt":
             lighthouse = shutil.which("lighthouse")
             if lighthouse:
-                return [lighthouse, *base_args]
+                diag["executable"] = lighthouse
+                return [lighthouse, *base_args], diag
 
             npx = shutil.which("npx")
             if npx:
-                return [npx, "--yes", "lighthouse", *base_args]
+                diag["executable"] = npx
+                return [npx, "--yes", "lighthouse", *base_args], diag
 
             raise RuntimeError(
                 "Node.js/npm was not found. Install Node.js LTS and Lighthouse (`npm i -g lighthouse`) "
@@ -73,19 +93,22 @@ class PerformanceTestRunner(TestRunner):
 
         lighthouse_cmd = shutil.which("lighthouse.cmd") or shutil.which("lighthouse.bat") or shutil.which("lighthouse.exe")
         if lighthouse_cmd:
-            return [lighthouse_cmd, *base_args]
+            diag["executable"] = lighthouse_cmd
+            return [lighthouse_cmd, *base_args], diag
 
         npx_cmd = shutil.which("npx.cmd") or shutil.which("npx.exe") or shutil.which("npx.bat")
         if npx_cmd:
-            return [npx_cmd, "--yes", "lighthouse", *base_args]
+            diag["executable"] = npx_cmd
+            return [npx_cmd, "--yes", "lighthouse", *base_args], diag
 
         lighthouse_ps1 = shutil.which("lighthouse")
-        pwsh = shutil.which("pwsh") or shutil.which("powershell")
-        if lighthouse_ps1 and lighthouse_ps1.lower().endswith(".ps1") and pwsh:
-            return [pwsh, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", lighthouse_ps1, *base_args]
+        if lighthouse_ps1 and lighthouse_ps1.lower().endswith(".ps1"):
+            diag["executable"] = lighthouse_ps1
+            raise RuntimeError(
+                "Windows PATH resolves Lighthouse to a .ps1 shim, which cannot be launched reliably from Python. "
+                "Install/repair npm shims so `lighthouse.cmd` or `npx.cmd` is available."
+            )
 
-        node = shutil.which("node")
-        npm = shutil.which("npm") or shutil.which("npm.cmd")
         if not node or not npm:
             raise RuntimeError(
                 "Node.js/npm was not found. Install Node.js LTS, reopen terminal, and rerun EAST."
@@ -94,6 +117,42 @@ class PerformanceTestRunner(TestRunner):
         raise RuntimeError(
             "Lighthouse CLI was not found as an executable shim. Install globally with `npm i -g lighthouse` "
             "or run with npm available so EAST can use `npx` automatically."
+        )
+
+    def _prepare_profile_dir(self) -> str:
+        """Create a stable Chrome profile directory for Lighthouse runs."""
+        if os.name == "nt":
+            localappdata = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+            base_dir = os.path.join(localappdata, "EAST", "lighthouse_profiles", self.domain)
+        else:
+            base_dir = os.path.join(tempfile.gettempdir(), "east", "lighthouse_profiles", self.domain)
+
+        cache_dir = os.path.join(base_dir, "cache")
+        os.makedirs(cache_dir, exist_ok=True)
+        return base_dir
+
+    @staticmethod
+    def _build_chrome_flags(profile_base: str) -> str:
+        """Build Chrome flags string for stable headless Lighthouse runs."""
+        cache_dir = os.path.join(profile_base, "cache")
+        return (
+            "--headless=new --disable-gpu --no-first-run --no-default-browser-check "
+            f"--user-data-dir={shlex.quote(str(profile_base))} "
+            f"--disk-cache-dir={shlex.quote(str(cache_dir))}"
+        )
+
+    @staticmethod
+    def _format_diagnostics(diag: dict[str, Any], cmd: list[str]) -> str:
+        """Build compact diagnostic context for subprocess failures."""
+        command_preview = " ".join(shlex.quote(part) for part in cmd[:6])
+        if len(cmd) > 6:
+            command_preview += " ..."
+        return (
+            "Diagnostics: "
+            f"executable={diag.get('executable', '<unresolved>')}; "
+            f"node_detected={diag.get('node_detected')}; "
+            f"npm_detected={diag.get('npm_detected')}; "
+            f"cmd={command_preview}"
         )
 
     def _parse_lighthouse_result(self, payload: dict[str, Any], source: str) -> TestResult:

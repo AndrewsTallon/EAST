@@ -49,7 +49,7 @@ On Windows, EAST resolves Lighthouse using executable shims automatically:
 
 - Prefers `lighthouse.cmd` / `.bat` / `.exe`
 - Falls back to `npx.cmd --yes lighthouse ...`
-- If only `lighthouse.ps1` is present, EAST uses `pwsh`/`powershell` with execution bypass
+- Does **not** execute `lighthouse.ps1` shims; requires `lighthouse.cmd` or `npx.cmd`
 
 Setup steps:
 
@@ -88,6 +88,20 @@ python -m east.cli scan --domain example.com --tests dns_lookup,email_auth
 python -m east.cli scan --domain example.com --tests ssl_labs,security_headers
 ```
 
+
+### Performance smoke checks
+
+Use these quick checks to validate performance scanning and report generation:
+
+```bash
+# Performance-only run (local Lighthouse, no API keys)
+python -m east.cli scan --domains genwayhome.com --tests performance --output tmp-performance.docx
+
+# Full run without performance
+python -m east.cli scan --domains genwayhome.com --tests ssl_labs,dns_lookup,email_auth,security_headers --output tmp-no-performance.docx
+```
+
+If local Lighthouse dependencies are missing (Node/Chrome/Lighthouse), EAST marks the performance test as `ERROR` with diagnostics and continues report generation.
 
 ### Web UI (FastAPI)
 

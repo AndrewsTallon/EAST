@@ -50,6 +50,9 @@ class ReportGenerationTests(unittest.TestCase):
             self.assertIn("Assessment Overview", joined_text)
             self.assertGreaterEqual(len(doc.tables), 4)  # overview tables + other report tables
 
+            table_text = "\n".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
+            self.assertIn("Screenshots (ERROR)", table_text)
+
 
 if __name__ == "__main__":
     unittest.main()

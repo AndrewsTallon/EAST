@@ -10,7 +10,7 @@ from docx import Document
 from docx.shared import Inches, Pt, Cm, RGBColor, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
-from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
 
@@ -56,7 +56,8 @@ class EASTReportGenerator:
     """Generates professional Word document reports for EAST scans."""
 
     OVERVIEW_COLUMNS = 4
-    OVERVIEW_ICON_HEIGHT = Pt(10)
+    OVERVIEW_ICON_HEIGHT = Inches(0.25)
+    OVERVIEW_LABEL_FONT_SIZE = Pt(11)
 
     def __init__(self, config: EASTConfig):
         self.config = config
@@ -285,12 +286,12 @@ class EASTReportGenerator:
             if result.success and result.score is not None:
                 items.append({
                     "label": self._format_test_label(result.test_name),
-                    "badge": create_grade_badge(result.grade or "N/A", size=0.45),
+                    "badge": create_grade_badge(result.grade or "N/A", size=0.6),
                 })
             elif not result.success:
                 items.append({
                     "label": f"{self._format_test_label(result.test_name)} (ERROR)",
-                    "badge": create_status_badge("ERROR", status="critical", size=(1.0, 0.35)),
+                    "badge": create_status_badge("ERROR", status="critical", size=(1.2, 0.45)),
                 })
 
         return items
@@ -301,27 +302,32 @@ class EASTReportGenerator:
         rows = (len(overview_items) + columns - 1) // columns
         table = self.document.add_table(rows=rows, cols=columns)
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
-        table.autofit = True
+        table.autofit = False
 
         for index, item in enumerate(overview_items):
             row_idx = index // columns
             col_idx = index % columns
             cell = table.cell(row_idx, col_idx)
+            cell.vertical_alignment = WD_CELL_VERTICAL_ALIGNMENT.CENTER
+            cell.width = Inches(1.45)
+
             paragraph = cell.paragraphs[0]
-            paragraph.paragraph_format.space_before = Pt(1)
-            paragraph.paragraph_format.space_after = Pt(1)
+            paragraph.paragraph_format.space_before = Pt(2)
+            paragraph.paragraph_format.space_after = Pt(2)
+            paragraph.paragraph_format.line_spacing = 1.15
 
             badge_run = paragraph.add_run()
-            self._safe_add_picture(
+            added = self._safe_add_picture(
                 badge_run,
                 item["badge"],
                 height=self.OVERVIEW_ICON_HEIGHT,
                 warning_context=f"overview badge for {item['label']}",
             )
 
-            label_run = paragraph.add_run(f" {item['label']}")
+            label_prefix = "   " if added else ""
+            label_run = paragraph.add_run(f"{label_prefix}{item['label']}")
             label_run.font.name = FONT_BODY
-            label_run.font.size = Pt(10)
+            label_run.font.size = self.OVERVIEW_LABEL_FONT_SIZE
             label_run.font.color.rgb = COLOR_BODY
 
         self.document.add_paragraph()
