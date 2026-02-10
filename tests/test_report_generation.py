@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from docx import Document
+from docx.enum.table import WD_ROW_HEIGHT_RULE
 
 from east.config import EASTConfig
 from east.report import EASTReportGenerator
@@ -52,6 +53,11 @@ class ReportGenerationTests(unittest.TestCase):
 
             table_text = "\n".join(cell.text for table in doc.tables for row in table.rows for cell in row.cells)
             self.assertIn("Screenshots (ERROR)", table_text)
+
+            overview_table = doc.tables[0]
+            for row in overview_table.rows:
+                self.assertEqual(row.height_rule, WD_ROW_HEIGHT_RULE.EXACTLY)
+                self.assertAlmostEqual(row.height.inches, 0.7, places=2)
 
 
 if __name__ == "__main__":

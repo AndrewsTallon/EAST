@@ -10,7 +10,7 @@ from docx import Document
 from docx.shared import Inches, Pt, Cm, RGBColor, Emu
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.enum.section import WD_ORIENT
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT, WD_ROW_HEIGHT_RULE
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
 
@@ -56,7 +56,8 @@ class EASTReportGenerator:
     """Generates professional Word document reports for EAST scans."""
 
     OVERVIEW_COLUMNS = 4
-    OVERVIEW_ICON_HEIGHT = Inches(0.25)
+    OVERVIEW_ICON_HEIGHT = Inches(0.55)
+    OVERVIEW_ROW_HEIGHT = Inches(0.7)
     OVERVIEW_LABEL_FONT_SIZE = Pt(11)
 
     def __init__(self, config: EASTConfig):
@@ -304,6 +305,10 @@ class EASTReportGenerator:
         table.alignment = WD_TABLE_ALIGNMENT.CENTER
         table.autofit = False
 
+        for row in table.rows:
+            row.height = self.OVERVIEW_ROW_HEIGHT
+            row.height_rule = WD_ROW_HEIGHT_RULE.EXACTLY
+
         for index, item in enumerate(overview_items):
             row_idx = index // columns
             col_idx = index % columns
@@ -324,8 +329,10 @@ class EASTReportGenerator:
                 warning_context=f"overview badge for {item['label']}",
             )
 
-            label_prefix = "   " if added else ""
-            label_run = paragraph.add_run(f"{label_prefix}{item['label']}")
+            if added:
+                paragraph.add_run("\u00A0\u00A0\u00A0")
+
+            label_run = paragraph.add_run(item['label'])
             label_run.font.name = FONT_BODY
             label_run.font.size = self.OVERVIEW_LABEL_FONT_SIZE
             label_run.font.color.rgb = COLOR_BODY
