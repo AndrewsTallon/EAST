@@ -6,15 +6,19 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+import requests
+
 from east.tests.base import TestRunner, TestResult
-from east.utils.http import get_json
+from east.utils.http import get_json, check_api_health, DEFAULT_HEADERS
 from east.visuals.badges import create_grade_badge, create_status_badge
 from east.visuals.charts import create_certificate_timeline, create_protocol_support_chart
 
 logger = logging.getLogger(__name__)
 
 SSL_LABS_API = "https://api.ssllabs.com/api/v3"
+INFO_ENDPOINT = f"{SSL_LABS_API}/info"
 ANALYZE_ENDPOINT = f"{SSL_LABS_API}/analyze"
+
 MAX_POLL_ATTEMPTS = 60
 POLL_INTERVAL = 10  # seconds
 
@@ -28,14 +32,24 @@ class SSLLabsTestRunner(TestRunner):
     def run(self) -> TestResult:
         """Execute SSL Labs scan and return results."""
         try:
-            # Start the analysis
-            data = self._start_analysis()
+            # Quick health check before starting a potentially long scan
+            if not self._check_health():
+                return self._create_error_result(
+                    "SSL Labs API is currently unavailable. "
+                    "The service may be overloaded — try again later."
+                )
+
+            # Try cached results first, then fall back to a new scan
+            data = self._get_cached_results()
+            if data is None:
+                data = self._start_new_scan()
+
             if data is None:
                 return self._create_error_result(
                     "Failed to start SSL Labs analysis. The API may be unavailable."
                 )
 
-            # Poll for results
+            # Poll until finished
             data = self._poll_for_results(data)
             if data is None:
                 return self._create_error_result(
@@ -48,27 +62,44 @@ class SSLLabsTestRunner(TestRunner):
             logger.exception("SSL Labs test failed for %s", self.domain)
             return self._create_error_result(str(e))
 
-    def _start_analysis(self) -> Optional[dict]:
-        """Start an SSL Labs analysis."""
-        params = {
-            "host": self.domain,
-            "publish": "off",
-            "startNew": "off",
-            "fromCache": "on",
-            "maxAge": "24",
-            "all": "done",
-        }
-        self.logger.info("Starting SSL Labs analysis for %s", self.domain)
-        result = get_json(ANALYZE_ENDPOINT, params=params, timeout=60, retries=2)
+    # ------------------------------------------------------------------
+    # API interaction
+    # ------------------------------------------------------------------
 
-        if result is None:
-            # Try starting a new scan
-            params["startNew"] = "on"
-            del params["fromCache"]
-            del params["maxAge"]
-            result = get_json(ANALYZE_ENDPOINT, params=params, timeout=60, retries=2)
+    def _check_health(self) -> bool:
+        """Verify the SSL Labs API is reachable before scanning."""
+        self.logger.info("Checking SSL Labs API health...")
+        return check_api_health(INFO_ENDPOINT, timeout=10)
 
-        return result
+    def _get_cached_results(self) -> Optional[dict]:
+        """Try to fetch cached results (fast, no rate-limit cost)."""
+        self.logger.info("Requesting cached SSL Labs results for %s", self.domain)
+        return get_json(
+            ANALYZE_ENDPOINT,
+            params={
+                "host": self.domain,
+                "fromCache": "on",
+                "maxAge": 24,
+                "all": "done",
+            },
+            timeout=60,
+            retries=2,
+        )
+
+    def _start_new_scan(self) -> Optional[dict]:
+        """Initiate a fresh SSL Labs scan."""
+        self.logger.info("Starting new SSL Labs scan for %s", self.domain)
+        return get_json(
+            ANALYZE_ENDPOINT,
+            params={
+                "host": self.domain,
+                "startNew": "on",
+                "publish": "off",
+                "all": "done",
+            },
+            timeout=60,
+            retries=2,
+        )
 
     def _poll_for_results(self, data: dict) -> Optional[dict]:
         """Poll the SSL Labs API until analysis is complete."""
@@ -77,38 +108,52 @@ class SSLLabsTestRunner(TestRunner):
         for attempt in range(MAX_POLL_ATTEMPTS):
             if status == "READY":
                 return data
-            elif status == "ERROR":
-                self.logger.error("SSL Labs returned error: %s",
-                                  data.get("statusMessage", "Unknown error"))
+
+            if status == "ERROR":
+                msg = data.get("statusMessage", "Unknown error")
+                self.logger.error("SSL Labs returned error: %s", msg)
                 return None
-            elif status in ("DNS", "IN_PROGRESS"):
-                self.logger.info("SSL Labs analysis in progress (attempt %d/%d)...",
-                                 attempt + 1, MAX_POLL_ATTEMPTS)
+
+            if status in ("DNS", "IN_PROGRESS"):
+                self.logger.info(
+                    "SSL Labs analysis in progress (attempt %d/%d)...",
+                    attempt + 1, MAX_POLL_ATTEMPTS,
+                )
                 time.sleep(POLL_INTERVAL)
+                # Poll without startNew — just check status
                 data = get_json(
                     ANALYZE_ENDPOINT,
-                    params={"host": self.domain, "all": "done"},
+                    params={
+                        "host": self.domain,
+                        "all": "done",
+                    },
                     timeout=60,
                     retries=1,
                 )
                 if data is None:
                     return None
                 status = data.get("status", "")
-            else:
-                self.logger.warning("Unknown SSL Labs status: %s", status)
-                time.sleep(POLL_INTERVAL)
-                data = get_json(
-                    ANALYZE_ENDPOINT,
-                    params={"host": self.domain, "all": "done"},
-                    timeout=60,
-                    retries=1,
-                )
-                if data is None:
-                    return None
-                status = data.get("status", "")
+                continue
+
+            # Unknown / unexpected status
+            self.logger.warning("Unknown SSL Labs status: %s", status)
+            time.sleep(POLL_INTERVAL)
+            data = get_json(
+                ANALYZE_ENDPOINT,
+                params={"host": self.domain, "all": "done"},
+                timeout=60,
+                retries=1,
+            )
+            if data is None:
+                return None
+            status = data.get("status", "")
 
         self.logger.error("SSL Labs analysis timed out for %s", self.domain)
         return None
+
+    # ------------------------------------------------------------------
+    # Result parsing
+    # ------------------------------------------------------------------
 
     def _parse_results(self, data: dict) -> TestResult:
         """Parse the SSL Labs API response into a TestResult."""
@@ -332,6 +377,10 @@ class SSLLabsTestRunner(TestRunner):
         vulns["DROWN"] = details.get("drownVulnerable", False)
 
         return vulns
+
+    # ------------------------------------------------------------------
+    # Recommendations
+    # ------------------------------------------------------------------
 
     def _generate_recommendations(
         self,
