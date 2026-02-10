@@ -123,5 +123,76 @@ class PerformanceRunnerCommandResolutionTests(unittest.TestCase):
         makedirs_mock.assert_called_once_with(r"C:\Users\andre\AppData\Local\EAST\tmp", exist_ok=True)
 
 
+class PerformanceRunnerPresentationDepthTests(unittest.TestCase):
+    def test_parse_lighthouse_result_includes_cwv_and_top_opportunities(self):
+        runner = PerformanceTestRunner("example.com")
+        payload = {
+            "categories": {
+                "performance": {"score": 0.84},
+                "accessibility": {"score": 0.91},
+                "best-practices": {"score": 0.88},
+                "seo": {"score": 0.93},
+            },
+            "audits": {
+                "largest-contentful-paint": {"numericValue": 2600},
+                "interaction-to-next-paint": {"numericValue": 620},
+                "cumulative-layout-shift": {"numericValue": 0.06},
+                "first-contentful-paint": {"numericValue": 1700},
+                "total-blocking-time": {"numericValue": 240},
+                "Reduce unused JavaScript": {
+                    "title": "Reduce unused JavaScript",
+                    "score": 0.3,
+                    "details": {"overallSavingsMs": 820, "overallSavingsBytes": 45000},
+                },
+                "Serve images in next-gen formats": {
+                    "title": "Serve images in next-gen formats",
+                    "score": 0.2,
+                    "details": {"overallSavingsMs": 200, "overallSavingsBytes": 180000},
+                },
+                "Eliminate render-blocking resources": {
+                    "title": "Eliminate render-blocking resources",
+                    "score": 0.4,
+                    "details": {"overallSavingsMs": 540, "overallSavingsBytes": 0},
+                },
+                "Properly size images": {
+                    "title": "Properly size images",
+                    "score": 1,
+                    "details": {"overallSavingsMs": 999, "overallSavingsBytes": 99999},
+                },
+            },
+        }
+
+        result = runner._parse_lighthouse_result(payload, source="Lighthouse Local")
+
+        self.assertIn("Assessment Context", result.summary)
+        self.assertEqual(result.tables[0]["title"], "Performance Metrics")
+
+        cwv_table = next(table for table in result.tables if table["title"] == "Core Web Vitals")
+        self.assertEqual(cwv_table["rows"][0], ["LCP", "2.60s", "Needs Improvement"])
+        self.assertEqual(cwv_table["rows"][1], ["INP", "620ms", "Poor"])
+        self.assertEqual(cwv_table["rows"][2], ["CLS", "0.06", "Good"])
+
+        opp_table = next(table for table in result.tables if table["title"] == "Top Performance Opportunities")
+        self.assertEqual(len(opp_table["rows"]), 3)
+        self.assertEqual(opp_table["rows"][0][0], "Reduce unused JavaScript")
+        self.assertIn("ms", opp_table["rows"][0][1])
+        self.assertIn("KB", opp_table["rows"][0][1])
+
+    def test_top_opportunities_limits_to_five(self):
+        runner = PerformanceTestRunner("example.com")
+        audits = {}
+        for idx in range(7):
+            audits[f"audit-{idx}"] = {
+                "title": f"Opportunity {idx}",
+                "score": 0.5,
+                "details": {"overallSavingsMs": 100 + idx, "overallSavingsBytes": 0},
+            }
+
+        rows = runner._build_top_opportunities_rows(audits)
+
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(rows[0][0], "Opportunity 6")
+
+
 if __name__ == "__main__":
     unittest.main()
