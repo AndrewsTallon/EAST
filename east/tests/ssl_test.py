@@ -9,18 +9,17 @@ from typing import Any, Optional
 import requests
 
 from east.tests.base import TestRunner, TestResult
-from east.utils.http import get_json, check_api_health, DEFAULT_HEADERS
+from east.utils.http import get_json, DEFAULT_HEADERS
 from east.visuals.badges import create_grade_badge, create_status_badge
 from east.visuals.charts import create_certificate_timeline, create_protocol_support_chart
 
 logger = logging.getLogger(__name__)
 
 SSL_LABS_API = "https://api.ssllabs.com/api/v3"
-INFO_ENDPOINT = f"{SSL_LABS_API}/info"
 ANALYZE_ENDPOINT = f"{SSL_LABS_API}/analyze"
 
 MAX_POLL_ATTEMPTS = 60
-POLL_INTERVAL = 10  # seconds
+POLL_INTERVAL = 15  # seconds — SSL Labs scans take minutes; no point hammering
 
 
 class SSLLabsTestRunner(TestRunner):
@@ -32,21 +31,42 @@ class SSLLabsTestRunner(TestRunner):
     def run(self) -> TestResult:
         """Execute SSL Labs scan and return results."""
         try:
-            # Quick health check before starting a potentially long scan
-            if not self._check_health():
-                return self._create_error_result(
-                    "SSL Labs API is currently unavailable. "
-                    "The service may be overloaded — try again later."
+            # Try cached results first (cheap, avoids rate limits)
+            self.logger.info("Requesting cached SSL Labs results for %s", self.domain)
+            data = get_json(
+                ANALYZE_ENDPOINT,
+                params={
+                    "host": self.domain,
+                    "fromCache": "on",
+                    "maxAge": 24,
+                    "all": "done",
+                },
+                timeout=60,
+                retries=4,
+            )
+
+            # If cache miss / error, start a new scan
+            if data is None:
+                self.logger.info(
+                    "No cached results — starting new SSL Labs scan for %s",
+                    self.domain,
+                )
+                data = get_json(
+                    ANALYZE_ENDPOINT,
+                    params={
+                        "host": self.domain,
+                        "startNew": "on",
+                        "publish": "off",
+                        "all": "done",
+                    },
+                    timeout=60,
+                    retries=4,
                 )
 
-            # Try cached results first, then fall back to a new scan
-            data = self._get_cached_results()
-            if data is None:
-                data = self._start_new_scan()
-
             if data is None:
                 return self._create_error_result(
-                    "Failed to start SSL Labs analysis. The API may be unavailable."
+                    "SSL Labs API is not responding. "
+                    "The service may be overloaded — try again later."
                 )
 
             # Poll until finished
@@ -65,41 +85,6 @@ class SSLLabsTestRunner(TestRunner):
     # ------------------------------------------------------------------
     # API interaction
     # ------------------------------------------------------------------
-
-    def _check_health(self) -> bool:
-        """Verify the SSL Labs API is reachable before scanning."""
-        self.logger.info("Checking SSL Labs API health...")
-        return check_api_health(INFO_ENDPOINT, timeout=10)
-
-    def _get_cached_results(self) -> Optional[dict]:
-        """Try to fetch cached results (fast, no rate-limit cost)."""
-        self.logger.info("Requesting cached SSL Labs results for %s", self.domain)
-        return get_json(
-            ANALYZE_ENDPOINT,
-            params={
-                "host": self.domain,
-                "fromCache": "on",
-                "maxAge": 24,
-                "all": "done",
-            },
-            timeout=60,
-            retries=2,
-        )
-
-    def _start_new_scan(self) -> Optional[dict]:
-        """Initiate a fresh SSL Labs scan."""
-        self.logger.info("Starting new SSL Labs scan for %s", self.domain)
-        return get_json(
-            ANALYZE_ENDPOINT,
-            params={
-                "host": self.domain,
-                "startNew": "on",
-                "publish": "off",
-                "all": "done",
-            },
-            timeout=60,
-            retries=2,
-        )
 
     def _poll_for_results(self, data: dict) -> Optional[dict]:
         """Poll the SSL Labs API until analysis is complete."""
