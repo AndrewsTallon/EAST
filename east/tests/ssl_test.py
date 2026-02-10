@@ -77,10 +77,16 @@ class SSLLabsTestRunner(TestRunner):
     # ------------------------------------------------------------------
 
     def _ssllabs_get(self, params: dict, timeout: int = 60) -> Optional[dict]:
-        """GET the analyze endpoint with SSL-Labs-specific retry settings."""
+        """GET the analyze endpoint with SSL-Labs-specific retry settings.
+
+        The registered *email* is sent as an HTTP header (required by API v4)
+        rather than as a query parameter.
+        """
+        headers = {"email": self.email} if self.email else None
         return get_json(
             ANALYZE_ENDPOINT,
             params=params,
+            headers=headers,
             timeout=timeout,
             retries=SSLLABS_MAX_RETRIES,
             overload_statuses=SSLLABS_OVERLOAD_STATUSES,
@@ -133,15 +139,21 @@ class SSLLabsTestRunner(TestRunner):
     def _start_or_fetch(self, use_cache: bool) -> Optional[dict]:
         """Either fetch cached results or kick off a new assessment.
 
-        When *use_cache* is True the flow is:
-          1. Ask for cached results (``fromCache=on``).
-          2. If the response indicates no usable cache, start a new scan.
+        Cache-first flow (``use_cache=True``):
+          1. ``GET /analyze?host=<domain>&publish=off&all=done`` — no
+             ``startNew``, no ``fromCache``.  The API returns the most recent
+             cached assessment if one exists.
+          2. If status is ``READY`` or still in progress (``DNS`` /
+             ``IN_PROGRESS``), return immediately for the caller to handle.
+          3. Only issue ``startNew=on`` when the status is ``ERROR`` or no
+             cached assessment is available.
+          4. If ``startNew`` fails (e.g. HTTP 529 after retries), fall back
+             to polling the cache rather than failing outright.
 
-        When *use_cache* is False:
+        Fresh flow (``use_cache=False``):
           - Start a fresh assessment immediately (``startNew=on``).
-
-        In both cases the method returns the first API response (which may
-        still have ``status=IN_PROGRESS``).  Callers must poll to completion.
+          - If that fails with overload (529 etc.), still fall back to
+            polling the existing assessment.
         """
         if use_cache:
             self.logger.info(
@@ -149,32 +161,51 @@ class SSLLabsTestRunner(TestRunner):
             )
             data = self._ssllabs_get({
                 "host": self.domain,
-                "email": self.email,
-                "fromCache": "on",
-                "maxAge": 24,
+                "publish": "off",
                 "all": "done",
             })
 
-            # A usable cached result comes back with status=READY.
-            # Anything else means we need a fresh scan.
-            if data is not None and data.get("status") == "READY":
-                return data
+            if data is not None:
+                status = data.get("status")
+                # Cached result ready — return immediately.
+                if status == "READY":
+                    return data
+                # Assessment still running — let the caller poll.
+                if status in ("DNS", "IN_PROGRESS"):
+                    return data
+                # API-level errors (e.g. bad host) — let the caller handle.
+                if "errors" in data:
+                    return data
 
+            # No usable cached data or status was ERROR — start a new scan.
             self.logger.info(
                 "No usable cache — starting new SSL Labs scan for %s",
                 self.domain,
             )
 
-        # Start a fresh assessment.  Do NOT set startNew if an assessment
-        # is already running — the API will return the in-progress one.
+        # Start a fresh assessment.
         self.logger.info("Starting new SSL Labs assessment for %s", self.domain)
-        return self._ssllabs_get({
+        data = self._ssllabs_get({
             "host": self.domain,
-            "email": self.email,
             "startNew": "on",
             "publish": "off",
             "all": "done",
         })
+
+        # If startNew failed (e.g. 529 after all retries), fall back to
+        # polling whatever the API already has for this host.
+        if data is None:
+            self.logger.warning(
+                "startNew failed for %s — falling back to cache polling",
+                self.domain,
+            )
+            data = self._ssllabs_get({
+                "host": self.domain,
+                "publish": "off",
+                "all": "done",
+            })
+
+        return data
 
     def _poll_for_results(self, data: dict) -> Optional[dict]:
         """Poll the SSL Labs API until analysis is complete.
@@ -202,7 +233,6 @@ class SSLLabsTestRunner(TestRunner):
                 # Poll WITHOUT startNew — just check the current assessment
                 data = self._ssllabs_get({
                     "host": self.domain,
-                    "email": self.email,
                     "all": "done",
                 })
                 if data is None:
@@ -219,7 +249,6 @@ class SSLLabsTestRunner(TestRunner):
             time.sleep(POLL_INTERVAL)
             data = self._ssllabs_get({
                 "host": self.domain,
-                "email": self.email,
                 "all": "done",
             })
             if data is None:
