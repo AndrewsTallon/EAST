@@ -1,4 +1,12 @@
-"""SSL Labs test runner for EAST tool."""
+"""SSL Labs test runner for EAST tool (API v4).
+
+API v4 requires one-time registration via the ``ssllabs-scan-v4-register``
+CLI tool shipped with the ssllabs-scan reference client.  After registering,
+pass the registered email address to this runner via the ``email`` parameter
+(CLI: ``--ssllabs-email``, config: ``ssllabs_email``).
+
+Reference: https://github.com/ssllabs/ssllabs-scan
+"""
 
 import io
 import time
@@ -15,59 +23,95 @@ from east.visuals.charts import create_certificate_timeline, create_protocol_sup
 
 logger = logging.getLogger(__name__)
 
-SSL_LABS_API = "https://api.ssllabs.com/api/v3"
+# ---------------------------------------------------------------------------
+# API v4 constants
+# ---------------------------------------------------------------------------
+SSL_LABS_API = "https://api.ssllabs.com/api/v4"
 ANALYZE_ENDPOINT = f"{SSL_LABS_API}/analyze"
 
-MAX_POLL_ATTEMPTS = 60
+MAX_POLL_ATTEMPTS = 80
 POLL_INTERVAL = 15  # seconds — SSL Labs scans take minutes; no point hammering
+
+# Retry / backoff tuning for SSL Labs.
+# 429/529/502/503 are all treated as "overloaded; back off".
+# The schedule gives a total window of ~8 minutes before giving up.
+SSLLABS_OVERLOAD_STATUSES = {429, 502, 503, 529}
+SSLLABS_OVERLOAD_BACKOFF = [10, 20, 40, 60, 90, 120]  # seconds
+SSLLABS_MAX_RETRIES = 6
+
+REGISTRATION_HELP = (
+    "SSL Labs API v4 requires a registered email address.\n"
+    "  1. Install the ssllabs-scan reference client.\n"
+    "  2. Run:  ssllabs-scan-v4-register "
+    "--firstName <first> --lastName <last> --organization <org> --email <email>\n"
+    "  3. Then pass the registered email:\n"
+    "       CLI:    --ssllabs-email registered@example.com\n"
+    "       Config: ssllabs_email: registered@example.com"
+)
 
 
 class SSLLabsTestRunner(TestRunner):
-    """Run SSL/TLS analysis using the SSL Labs API."""
+    """Run SSL/TLS analysis using the SSL Labs API v4.
+
+    Parameters
+    ----------
+    domain : str
+        The hostname to scan.
+    email : str
+        Registered organisation email required by API v4.
+    use_cache : bool
+        When True (default), request cached results first (``fromCache=on``).
+        When False, always start a fresh assessment.
+    """
 
     name = "ssl_labs"
-    description = "SSL/TLS Certificate & Configuration Analysis"
+    description = "SSL/TLS Certificate & Configuration Analysis (API v4)"
+
+    def __init__(self, domain: str, *, email: str = "", use_cache: bool = True):
+        super().__init__(domain)
+        self.email = email
+        self.use_cache = use_cache
+
+    # ------------------------------------------------------------------
+    # Convenience wrappers that inject SSL Labs retry settings
+    # ------------------------------------------------------------------
+
+    def _ssllabs_get(self, params: dict, timeout: int = 60) -> Optional[dict]:
+        """GET the analyze endpoint with SSL-Labs-specific retry settings."""
+        return get_json(
+            ANALYZE_ENDPOINT,
+            params=params,
+            timeout=timeout,
+            retries=SSLLABS_MAX_RETRIES,
+            overload_statuses=SSLLABS_OVERLOAD_STATUSES,
+            overload_backoff_schedule=SSLLABS_OVERLOAD_BACKOFF,
+            jitter=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def run(self) -> TestResult:
         """Execute SSL Labs scan and return results."""
-        try:
-            # Try cached results first (cheap, avoids rate limits)
-            self.logger.info("Requesting cached SSL Labs results for %s", self.domain)
-            data = get_json(
-                ANALYZE_ENDPOINT,
-                params={
-                    "host": self.domain,
-                    "fromCache": "on",
-                    "maxAge": 24,
-                    "all": "done",
-                },
-                timeout=60,
-                retries=4,
+        if not self.email:
+            return self._create_error_result(
+                f"No email provided for SSL Labs API v4.\n{REGISTRATION_HELP}"
             )
 
-            # If cache miss / error, start a new scan
-            if data is None:
-                self.logger.info(
-                    "No cached results — starting new SSL Labs scan for %s",
-                    self.domain,
-                )
-                data = get_json(
-                    ANALYZE_ENDPOINT,
-                    params={
-                        "host": self.domain,
-                        "startNew": "on",
-                        "publish": "off",
-                        "all": "done",
-                    },
-                    timeout=60,
-                    retries=4,
-                )
+        try:
+            data = self._start_or_fetch(self.use_cache)
 
             if data is None:
                 return self._create_error_result(
                     "SSL Labs API is not responding. "
                     "The service may be overloaded — try again later."
                 )
+
+            # Check for 4xx-style error body returned as JSON
+            if "errors" in data:
+                msgs = "; ".join(e.get("message", str(e)) for e in data["errors"])
+                return self._create_error_result(f"SSL Labs error: {msgs}")
 
             # Poll until finished
             data = self._poll_for_results(data)
@@ -86,8 +130,58 @@ class SSLLabsTestRunner(TestRunner):
     # API interaction
     # ------------------------------------------------------------------
 
+    def _start_or_fetch(self, use_cache: bool) -> Optional[dict]:
+        """Either fetch cached results or kick off a new assessment.
+
+        When *use_cache* is True the flow is:
+          1. Ask for cached results (``fromCache=on``).
+          2. If the response indicates no usable cache, start a new scan.
+
+        When *use_cache* is False:
+          - Start a fresh assessment immediately (``startNew=on``).
+
+        In both cases the method returns the first API response (which may
+        still have ``status=IN_PROGRESS``).  Callers must poll to completion.
+        """
+        if use_cache:
+            self.logger.info(
+                "Requesting cached SSL Labs results for %s", self.domain,
+            )
+            data = self._ssllabs_get({
+                "host": self.domain,
+                "email": self.email,
+                "fromCache": "on",
+                "maxAge": 24,
+                "all": "done",
+            })
+
+            # A usable cached result comes back with status=READY.
+            # Anything else means we need a fresh scan.
+            if data is not None and data.get("status") == "READY":
+                return data
+
+            self.logger.info(
+                "No usable cache — starting new SSL Labs scan for %s",
+                self.domain,
+            )
+
+        # Start a fresh assessment.  Do NOT set startNew if an assessment
+        # is already running — the API will return the in-progress one.
+        self.logger.info("Starting new SSL Labs assessment for %s", self.domain)
+        return self._ssllabs_get({
+            "host": self.domain,
+            "email": self.email,
+            "startNew": "on",
+            "publish": "off",
+            "all": "done",
+        })
+
     def _poll_for_results(self, data: dict) -> Optional[dict]:
-        """Poll the SSL Labs API until analysis is complete."""
+        """Poll the SSL Labs API until analysis is complete.
+
+        This method never sends ``startNew`` — it only checks the status of
+        the existing assessment.
+        """
         status = data.get("status", "")
 
         for attempt in range(MAX_POLL_ATTEMPTS):
@@ -105,35 +199,37 @@ class SSLLabsTestRunner(TestRunner):
                     attempt + 1, MAX_POLL_ATTEMPTS,
                 )
                 time.sleep(POLL_INTERVAL)
-                # Poll without startNew — just check status
-                data = get_json(
-                    ANALYZE_ENDPOINT,
-                    params={
-                        "host": self.domain,
-                        "all": "done",
-                    },
-                    timeout=60,
-                    retries=1,
-                )
+                # Poll WITHOUT startNew — just check the current assessment
+                data = self._ssllabs_get({
+                    "host": self.domain,
+                    "email": self.email,
+                    "all": "done",
+                })
                 if data is None:
+                    self.logger.error(
+                        "Lost contact with SSL Labs while polling for %s",
+                        self.domain,
+                    )
                     return None
                 status = data.get("status", "")
                 continue
 
-            # Unknown / unexpected status
-            self.logger.warning("Unknown SSL Labs status: %s", status)
+            # Unknown / unexpected status — treat like IN_PROGRESS
+            self.logger.warning("Unexpected SSL Labs status: %s", status)
             time.sleep(POLL_INTERVAL)
-            data = get_json(
-                ANALYZE_ENDPOINT,
-                params={"host": self.domain, "all": "done"},
-                timeout=60,
-                retries=1,
-            )
+            data = self._ssllabs_get({
+                "host": self.domain,
+                "email": self.email,
+                "all": "done",
+            })
             if data is None:
                 return None
             status = data.get("status", "")
 
-        self.logger.error("SSL Labs analysis timed out for %s", self.domain)
+        self.logger.error(
+            "SSL Labs analysis timed out for %s after %d poll attempts",
+            self.domain, MAX_POLL_ATTEMPTS,
+        )
         return None
 
     # ------------------------------------------------------------------

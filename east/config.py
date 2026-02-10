@@ -51,6 +51,8 @@ class EASTConfig:
     output: OutputConfig = field(default_factory=OutputConfig)
     branding: BrandingConfig = field(default_factory=BrandingConfig)
     api_keys: APIKeys = field(default_factory=APIKeys)
+    ssllabs_email: str = ""
+    ssllabs_usecache: bool = True
 
     @classmethod
     def from_yaml(cls, path: str) -> "EASTConfig":
@@ -104,6 +106,12 @@ class EASTConfig:
                 google_pagespeed=ak.get("google_pagespeed", ""),
                 mxtoolbox=ak.get("mxtoolbox", ""),
             )
+
+        if "ssllabs_email" in data:
+            config.ssllabs_email = data["ssllabs_email"]
+
+        if "ssllabs_usecache" in data:
+            config.ssllabs_usecache = bool(data["ssllabs_usecache"])
 
         return config
 

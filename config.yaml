@@ -26,6 +26,11 @@ tests:
   disabled:
     - vulnerability_scan
 
+# SSL Labs API v4 requires a registered email.
+# Register once via: ssllabs-scan-v4-register --firstName --lastName --organization --email
+ssllabs_email: ""
+ssllabs_usecache: true
+
 api_keys:
   google_pagespeed: ""
   mxtoolbox: ""
