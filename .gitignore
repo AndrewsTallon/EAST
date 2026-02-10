@@ -6,3 +6,6 @@ dist/
 build/
 *.egg
 .eggs/
+
+# Generated report files
+EAST_*.docx
