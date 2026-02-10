@@ -1,6 +1,8 @@
 """Performance test runner using Lighthouse CLI or PageSpeed API."""
 
 import json
+import logging
+import ntpath
 import os
 import shutil
 import subprocess
@@ -9,6 +11,9 @@ import shlex
 from typing import Any
 
 from east.tests.base import TestResult, TestRunner
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class PerformanceTestRunner(TestRunner):
@@ -32,25 +37,33 @@ class PerformanceTestRunner(TestRunner):
             output_path = tmp.name
 
         cmd, diag = self._build_lighthouse_command(output_path)
+        run_env = self._build_lighthouse_env()
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240, env=run_env)
         except Exception as exc:
             return self._create_error_result(
                 f"Lighthouse failed to start: {exc}. {self._format_diagnostics(diag, cmd)}"
             )
 
         if proc.returncode != 0:
+            payload = self._try_load_output_payload(output_path)
             err = proc.stderr.strip() or proc.stdout.strip() or "Unknown lighthouse error"
+            if payload and self._is_cleanup_eperm(err):
+                LOGGER.warning(
+                    "Lighthouse cleanup failed with EPERM during temporary dir destroy, "
+                    "but JSON results were captured at %s.",
+                    output_path,
+                )
+                return self._parse_lighthouse_result(payload, source="Lighthouse Local")
+
             return self._create_error_result(f"Lighthouse failed: {err}. {self._format_diagnostics(diag, cmd)}")
 
-        if not os.path.exists(output_path):
+        payload = self._try_load_output_payload(output_path)
+        if payload is None:
             return self._create_error_result(
                 "Lighthouse did not produce output JSON. Ensure Chrome/Chromium is installed and runnable. "
                 f"{self._format_diagnostics(diag, cmd)}"
             )
-
-        with open(output_path, "r", encoding="utf-8") as fh:
-            payload = json.load(fh)
 
         return self._parse_lighthouse_result(payload, source="Lighthouse Local")
 
@@ -123,7 +136,7 @@ class PerformanceTestRunner(TestRunner):
         """Create a stable Chrome profile directory for Lighthouse runs."""
         if os.name == "nt":
             localappdata = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-            base_dir = os.path.join(localappdata, "EAST", "lighthouse_profiles", self.domain)
+            base_dir = ntpath.join(localappdata, "EAST", "lighthouse_profiles", self.domain)
         else:
             base_dir = os.path.join(tempfile.gettempdir(), "east", "lighthouse_profiles", self.domain)
 
@@ -137,9 +150,40 @@ class PerformanceTestRunner(TestRunner):
         cache_dir = os.path.join(profile_base, "cache")
         return (
             "--headless=new --disable-gpu --no-first-run --no-default-browser-check "
-            f"--user-data-dir={shlex.quote(str(profile_base))} "
-            f"--disk-cache-dir={shlex.quote(str(cache_dir))}"
+            f"--user-data-dir={profile_base} "
+            f"--disk-cache-dir={cache_dir}"
         )
+
+    @staticmethod
+    def _is_cleanup_eperm(error_text: str) -> bool:
+        lowered = error_text.lower()
+        return "eperm" in lowered and "destroytmp" in lowered
+
+    @staticmethod
+    def _try_load_output_payload(output_path: str) -> dict[str, Any] | None:
+        if not os.path.exists(output_path):
+            return None
+
+        try:
+            with open(output_path, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _build_lighthouse_env(self) -> dict[str, str] | None:
+        if os.name != "nt":
+            return None
+
+        localappdata = os.environ.get("LOCALAPPDATA")
+        if not localappdata:
+            return None
+
+        stable_tmp = ntpath.join(localappdata, "EAST", "tmp")
+        os.makedirs(stable_tmp, exist_ok=True)
+        env = os.environ.copy()
+        env["TEMP"] = stable_tmp
+        env["TMP"] = stable_tmp
+        return env
 
     @staticmethod
     def _format_diagnostics(diag: dict[str, Any], cmd: list[str]) -> str:
