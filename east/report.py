@@ -404,6 +404,10 @@ class EASTReportGenerator:
             "blacklist": "Domain & IP Blacklist Check",
             "subdomains": "Subdomain Enumeration",
             "security_headers": "Security Headers Analysis",
+            "performance": "Performance Analysis",
+            "cookies": "Cookie Security Analysis",
+            "open_ports": "Open Ports Analysis",
+            "screenshots": "Website Screenshot",
         }
         title = test_titles.get(result.test_name, result.test_name.replace("_", " ").title())
         self.document.add_heading(title, level=2)
@@ -445,6 +449,22 @@ class EASTReportGenerator:
                 "Security headers analysis examines HTTP response headers that provide "
                 "additional security controls. Properly configured headers can prevent "
                 "XSS, clickjacking, and other client-side attacks."
+            ),
+            "performance": (
+                "Performance analysis evaluates page speed and best-practice web metrics "
+                "using Lighthouse or the PageSpeed Insights API."
+            ),
+            "cookies": (
+                "Cookie analysis checks for Secure, HttpOnly, and SameSite attributes "
+                "to reduce session theft and cross-site request risks."
+            ),
+            "open_ports": (
+                "Open ports analysis identifies exposed network services using nmap "
+                "top-port scanning to reduce unnecessary internet exposure."
+            ),
+            "screenshots": (
+                "Screenshot capture records the rendered web page for visual review and "
+                "evidence in the assessment workflow."
             ),
         }
         desc = test_descriptions.get(result.test_name, "")

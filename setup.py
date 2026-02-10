@@ -15,6 +15,10 @@ setup(
         "pyyaml>=6.0.1",
         "click>=8.1.0",
         "rich>=13.0.0",
+        "fastapi>=0.115.0",
+        "uvicorn>=0.30.0",
+        "python-multipart>=0.0.9",
+        "playwright>=1.48.0",
     ],
     entry_points={
         "console_scripts": [

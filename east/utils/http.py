@@ -215,6 +215,7 @@ def post_json(
     headers: Optional[dict] = None,
     timeout: int = DEFAULT_TIMEOUT,
     retries: int = MAX_RETRIES,
+    **kwargs: Any,
 ) -> Optional[dict]:
     """Make a POST request and return parsed JSON response."""
     merged = {"Content-Type": "application/x-www-form-urlencoded"}
@@ -228,6 +229,7 @@ def post_json(
         headers=merged,
         timeout=timeout,
         retries=retries,
+        **kwargs,
     )
     if response is not None:
         try:
