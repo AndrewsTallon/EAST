@@ -193,6 +193,15 @@ def _run_scan(config: EASTConfig, test_filter: list[str] | None, output: str, ve
     _register_tests()
     all_results: dict[str, list[TestResult]] = {}
 
+    # Validate SSL Labs email requirement before starting any scans
+    if "ssl_labs" in tests_to_run and not config.ssllabs_email:
+        from east.tests.ssl_test import REGISTRATION_HELP
+        console.print(
+            f"[red]Error:[/red] SSL Labs API v4 requires a registered email address.\n"
+            f"{REGISTRATION_HELP}"
+        )
+        sys.exit(1)
+
     total_tasks = len(valid_domains) * len(tests_to_run)
 
     with Progress(
@@ -220,7 +229,15 @@ def _run_scan(config: EASTConfig, test_filter: list[str] | None, output: str, ve
                 )
 
                 try:
-                    runner = runner_cls(domain)
+                    # Pass extra kwargs for runners that need them
+                    if test_name == "ssl_labs":
+                        runner = runner_cls(
+                            domain,
+                            email=config.ssllabs_email,
+                            use_cache=config.ssllabs_usecache,
+                        )
+                    else:
+                        runner = runner_cls(domain)
                     result = runner.run()
                     domain_results.append(result)
 
@@ -291,7 +308,19 @@ def cli(ctx):
 @click.option("--tests", "-t", help="Comma-separated list of tests to run")
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
 @click.option("--client", help="Client name for the report")
-def scan(domain, domains, config_path, output, tests, verbose, client):
+@click.option(
+    "--ssllabs-email",
+    default="",
+    envvar="SSLLABS_EMAIL",
+    help="Registered email for SSL Labs API v4 (required for ssl_labs test).",
+)
+@click.option(
+    "--ssllabs-usecache/--fresh",
+    default=True,
+    help="Use cached SSL Labs results (default) or force a fresh scan.",
+)
+def scan(domain, domains, config_path, output, tests, verbose, client,
+         ssllabs_email, ssllabs_usecache):
     """Run an External Attack Surface Test scan."""
     _setup_logging(verbose)
 
@@ -316,6 +345,12 @@ def scan(domain, domains, config_path, output, tests, verbose, client):
     if client:
         config.client_info.name = client
 
+    # SSL Labs v4 options — CLI flags take precedence over config
+    if ssllabs_email:
+        config.ssllabs_email = ssllabs_email
+    if not ssllabs_usecache:
+        config.ssllabs_usecache = False
+
     # Parse test filter
     test_filter = None
     if tests:
@@ -337,7 +372,7 @@ def list_tests():
     table.add_column("Description")
 
     test_descriptions = {
-        "ssl_labs": "SSL/TLS certificate and configuration analysis via SSL Labs API",
+        "ssl_labs": "SSL/TLS certificate and configuration analysis via SSL Labs API v4 (requires --ssllabs-email)",
         "mozilla_observatory": "HTTP security headers assessment via Mozilla Observatory",
         "dns_lookup": "DNS record lookup (A, AAAA, MX, NS, CNAME, TXT) and DNSSEC validation",
         "email_auth": "Email authentication checks (SPF, DKIM, DMARC)",

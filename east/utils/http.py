@@ -1,5 +1,6 @@
 """HTTP utility functions for EAST tool."""
 
+import random
 import time
 import logging
 from typing import Any, Optional
@@ -35,11 +36,20 @@ STANDARD_BACKOFF = [2, 4, 8]
 RATE_LIMIT_BACKOFF = [5, 15, 45]
 
 
-def _get_wait(backoff_schedule: list[int], attempt: int) -> int:
-    """Return wait time from a backoff schedule, clamping to last value."""
+def _get_wait(backoff_schedule: list[int], attempt: int, jitter: bool = False) -> float:
+    """Return wait time from a backoff schedule, clamping to last value.
+
+    When *jitter* is True, the base wait is multiplied by a random factor
+    between 0.5 and 1.5 to spread load across retrying clients.
+    """
     if attempt < len(backoff_schedule):
-        return backoff_schedule[attempt]
-    return backoff_schedule[-1]
+        base = backoff_schedule[attempt]
+    else:
+        base = backoff_schedule[-1]
+
+    if jitter:
+        return base * (0.5 + random.random())  # 0.5x – 1.5x
+    return float(base)
 
 
 def make_request(
@@ -50,15 +60,29 @@ def make_request(
     headers: Optional[dict] = None,
     timeout: int = DEFAULT_TIMEOUT,
     retries: int = MAX_RETRIES,
+    overload_statuses: Optional[set[int]] = None,
+    standard_backoff_schedule: Optional[list[int]] = None,
+    overload_backoff_schedule: Optional[list[int]] = None,
+    jitter: bool = False,
 ) -> Optional[requests.Response]:
     """Make an HTTP request with retry logic and exponential backoff.
 
     Retry behaviour:
-    - 4xx (except 429): NO retry, return None immediately
-    - 429 / 529: retry with heavy backoff (5s → 15s → 45s)
-    - 5xx: retry with standard backoff (2s → 4s → 8s)
+    - 4xx (except codes in *overload_statuses*): NO retry, return None
+    - *overload_statuses* (default 429/529): retry with overload backoff
+    - 5xx: retry with standard backoff
     - Connection / timeout errors: retry with standard backoff
+
+    Extra parameters (all optional):
+    - *overload_statuses*: status codes treated as overload (default {429, 529}).
+    - *standard_backoff_schedule*: backoff sequence for 5xx / network errors.
+    - *overload_backoff_schedule*: backoff sequence for overload codes.
+    - *jitter*: when True, randomise each wait ±50 % to avoid thundering herd.
     """
+    effective_overload = overload_statuses if overload_statuses is not None else RATE_LIMIT_STATUSES
+    effective_std_backoff = standard_backoff_schedule if standard_backoff_schedule is not None else STANDARD_BACKOFF
+    effective_ol_backoff = overload_backoff_schedule if overload_backoff_schedule is not None else RATE_LIMIT_BACKOFF
+
     merged_headers = dict(DEFAULT_HEADERS)
     if headers:
         merged_headers.update(headers)
@@ -81,16 +105,16 @@ def make_request(
             status = response.status_code
 
             # Rate-limited or overloaded — retry with heavy backoff
-            if status in RATE_LIMIT_STATUSES:
+            if status in effective_overload:
                 if attempt < retries:
                     retry_after = response.headers.get("Retry-After")
                     if retry_after and retry_after.isdigit():
-                        wait_time = int(retry_after)
+                        wait_time = float(int(retry_after))
                     else:
-                        wait_time = _get_wait(RATE_LIMIT_BACKOFF, attempt)
+                        wait_time = _get_wait(effective_ol_backoff, attempt, jitter=jitter)
                     logger.warning(
                         "Rate limited / overloaded at %s (HTTP %d, attempt %d/%d). "
-                        "Retrying in %ds...",
+                        "Retrying in %.1fs...",
                         url, status, attempt + 1, retries + 1, wait_time,
                     )
                     time.sleep(wait_time)
@@ -102,8 +126,8 @@ def make_request(
                     )
                     return None
 
-            # Non-retryable client error
-            if status in NO_RETRY_STATUSES:
+            # Non-retryable client error (exclude anything in effective_overload)
+            if 400 <= status < 500 and status not in effective_overload:
                 logger.error(
                     "Client error from %s: HTTP %d — not retrying.", url, status,
                 )
@@ -111,10 +135,10 @@ def make_request(
 
             # Other server errors (5xx) — retry with standard backoff
             if attempt < retries:
-                wait_time = _get_wait(STANDARD_BACKOFF, attempt)
+                wait_time = _get_wait(effective_std_backoff, attempt, jitter=jitter)
                 logger.warning(
                     "Server error from %s (HTTP %d, attempt %d/%d). "
-                    "Retrying in %ds...",
+                    "Retrying in %.1fs...",
                     url, status, attempt + 1, retries + 1, wait_time,
                 )
                 time.sleep(wait_time)
@@ -127,9 +151,9 @@ def make_request(
 
         except requests.exceptions.Timeout:
             if attempt < retries:
-                wait_time = _get_wait(STANDARD_BACKOFF, attempt)
+                wait_time = _get_wait(effective_std_backoff, attempt, jitter=jitter)
                 logger.warning(
-                    "Timeout reaching %s (attempt %d/%d). Retrying in %ds...",
+                    "Timeout reaching %s (attempt %d/%d). Retrying in %.1fs...",
                     url, attempt + 1, retries + 1, wait_time,
                 )
                 time.sleep(wait_time)
@@ -139,9 +163,9 @@ def make_request(
 
         except requests.exceptions.ConnectionError:
             if attempt < retries:
-                wait_time = _get_wait(STANDARD_BACKOFF, attempt)
+                wait_time = _get_wait(effective_std_backoff, attempt, jitter=jitter)
                 logger.warning(
-                    "Connection error to %s (attempt %d/%d). Retrying in %ds...",
+                    "Connection error to %s (attempt %d/%d). Retrying in %.1fs...",
                     url, attempt + 1, retries + 1, wait_time,
                 )
                 time.sleep(wait_time)
@@ -164,10 +188,16 @@ def get_json(
     headers: Optional[dict] = None,
     timeout: int = DEFAULT_TIMEOUT,
     retries: int = MAX_RETRIES,
+    **kwargs: Any,
 ) -> Optional[dict | list]:
-    """Make a GET request and return parsed JSON response."""
+    """Make a GET request and return parsed JSON response.
+
+    Extra keyword arguments are forwarded to :func:`make_request` (e.g.
+    ``overload_statuses``, ``jitter``, ``overload_backoff_schedule``).
+    """
     response = make_request(
         url, params=params, headers=headers, timeout=timeout, retries=retries,
+        **kwargs,
     )
     if response is not None:
         try:
