@@ -168,17 +168,27 @@ class PerformanceRunnerPresentationDepthTests(unittest.TestCase):
         self.assertEqual(result.tables[0]["title"], "Performance Metrics")
 
         cwv_table = next(table for table in result.tables if table["title"] == "Core Web Vitals")
-        self.assertEqual(cwv_table["rows"][0], ["LCP", "2.60s", "Needs Improvement"])
-        self.assertEqual(cwv_table["rows"][1], ["INP", "620ms", "Poor"])
-        self.assertEqual(cwv_table["rows"][2], ["CLS", "0.06", "Good"])
+        self.assertEqual(cwv_table["headers"], ["Metric", "Value", "Status", "Interpretation"])
+        self.assertEqual(cwv_table["rows"][0][0:3], ["LCP", "2.60s", "Needs Improvement"])
+        self.assertIn("largest above-the-fold content", cwv_table["rows"][0][3])
+        self.assertEqual(cwv_table["rows"][1][0:3], ["INP", "620ms", "Poor"])
+        self.assertIn("long JavaScript tasks", cwv_table["rows"][1][3])
+        self.assertEqual(
+            cwv_table["rows"][2],
+            ["CLS", "0.06", "Good", "Measures unexpected layout movement while the page loads or updates."],
+        )
+
+        supporting_table = next(table for table in result.tables if table["title"] == "Supporting Metrics")
+        self.assertEqual(supporting_table["rows"], [["FCP", "1.70s", "Good"], ["TBT", "240ms", "Needs Improvement"]])
 
         opp_table = next(table for table in result.tables if table["title"] == "Top Performance Opportunities")
         self.assertEqual(len(opp_table["rows"]), 3)
         self.assertEqual(opp_table["rows"][0][0], "Reduce unused JavaScript")
-        self.assertIn("ms", opp_table["rows"][0][1])
-        self.assertIn("KB", opp_table["rows"][0][1])
+        self.assertIn("Cause:", opp_table["rows"][0][1])
+        self.assertIn("Impact:", opp_table["rows"][0][1])
+        self.assertIn("JavaScript payloads", opp_table["rows"][0][1])
 
-    def test_top_opportunities_limits_to_five(self):
+    def test_top_opportunities_limits_to_three(self):
         runner = PerformanceTestRunner("example.com")
         audits = {}
         for idx in range(7):
@@ -190,8 +200,32 @@ class PerformanceRunnerPresentationDepthTests(unittest.TestCase):
 
         rows = runner._build_top_opportunities_rows(audits)
 
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), 3)
         self.assertEqual(rows[0][0], "Opportunity 6")
+
+    def test_recommendations_require_optimization_when_any_core_vital_is_poor(self):
+        runner = PerformanceTestRunner("example.com")
+        recommendations = runner._recommendations(
+            [
+                ["LCP", "2.40s", "Good", "..."],
+                ["INP", "620ms", "Poor", "..."],
+                ["CLS", "0.08", "Good", "..."],
+            ]
+        )
+        self.assertEqual(recommendations[0]["severity"], "critical")
+        self.assertIn("optimization is required", recommendations[0]["text"])
+
+    def test_recommendations_mark_healthy_when_all_core_vitals_are_good(self):
+        runner = PerformanceTestRunner("example.com")
+        recommendations = runner._recommendations(
+            [
+                ["LCP", "2.10s", "Good", "..."],
+                ["INP", "120ms", "Good", "..."],
+                ["CLS", "0.05", "Good", "..."],
+            ]
+        )
+        self.assertEqual(recommendations[0]["severity"], "info")
+        self.assertIn("performance posture is healthy", recommendations[0]["text"])
 
 
 if __name__ == "__main__":

@@ -22,25 +22,34 @@ class PerformanceTestRunner(TestRunner):
     name = "performance"
     description = "Web performance analysis via Lighthouse or PageSpeed"
 
-    _CORE_WEB_VITALS = {
+    _PRIMARY_CORE_WEB_VITALS = {
         "largest-contentful-paint": {
             "label": "LCP",
             "unit": "ms",
             "good": 2500,
             "needs_improvement": 4000,
+            "interpretation": "Measures how quickly the largest above-the-fold content is rendered.",
+            "degraded_causes": "Needs Improvement/Poor usually indicates slow server responses, redirects, heavy hero media, or render-blocking CSS/JS delaying paint.",
         },
         "interaction-to-next-paint": {
             "label": "INP",
             "unit": "ms",
             "good": 200,
             "needs_improvement": 500,
+            "interpretation": "Measures interface responsiveness from user input to the next visual update.",
+            "degraded_causes": "Needs Improvement/Poor usually points to long JavaScript tasks, main-thread contention, or excessive third-party scripts.",
         },
         "cumulative-layout-shift": {
             "label": "CLS",
             "unit": "unitless",
             "good": 0.1,
             "needs_improvement": 0.25,
+            "interpretation": "Measures unexpected layout movement while the page loads or updates.",
+            "degraded_causes": "Needs Improvement/Poor usually comes from unsized media, injected content, or late-loading fonts that reflow layout.",
         },
+    }
+
+    _SUPPORTING_METRICS = {
         "first-contentful-paint": {
             "label": "FCP",
             "unit": "ms",
@@ -242,6 +251,7 @@ class PerformanceTestRunner(TestRunner):
         overall = round((perf + access + best + seo) / 4)
 
         core_web_vitals_rows = self._build_core_web_vitals_rows(audits)
+        supporting_metrics_rows = self._build_supporting_metrics_rows(audits)
         top_opportunities_rows = self._build_top_opportunities_rows(audits)
 
         tables = [
@@ -262,8 +272,17 @@ class PerformanceTestRunner(TestRunner):
             tables.append(
                 {
                     "title": "Core Web Vitals",
-                    "headers": ["Metric", "Value", "Status"],
+                    "headers": ["Metric", "Value", "Status", "Interpretation"],
                     "rows": core_web_vitals_rows,
+                }
+            )
+
+        if supporting_metrics_rows:
+            tables.append(
+                {
+                    "title": "Supporting Metrics",
+                    "headers": ["Metric", "Value", "Status"],
+                    "rows": supporting_metrics_rows,
                 }
             )
 
@@ -271,7 +290,7 @@ class PerformanceTestRunner(TestRunner):
             tables.append(
                 {
                     "title": "Top Performance Opportunities",
-                    "headers": ["Opportunity", "Estimated Savings"],
+                    "headers": ["Opportunity", "Cause + Impact"],
                     "rows": top_opportunities_rows,
                 }
             )
@@ -297,12 +316,37 @@ class PerformanceTestRunner(TestRunner):
                 "seo": seo,
             },
             tables=tables,
-            recommendations=self._recommendations(overall),
+            recommendations=self._recommendations(core_web_vitals_rows),
         )
 
     def _build_core_web_vitals_rows(self, audits: dict[str, Any]) -> list[list[str]]:
         rows: list[list[str]] = []
-        for audit_id, definition in self._CORE_WEB_VITALS.items():
+        for audit_id, definition in self._PRIMARY_CORE_WEB_VITALS.items():
+            audit = audits.get(audit_id, {})
+            numeric_value = audit.get("numericValue")
+            if numeric_value is None:
+                continue
+
+            status = self._metric_status(
+                float(numeric_value),
+                good=float(definition["good"]),
+                needs_improvement=float(definition["needs_improvement"]),
+            )
+
+            rows.append(
+                [
+                    definition["label"],
+                    self._format_metric_value(float(numeric_value), unit=definition["unit"]),
+                    status,
+                    self._metric_interpretation(status, definition["interpretation"], definition["degraded_causes"]),
+                ]
+            )
+
+        return rows
+
+    def _build_supporting_metrics_rows(self, audits: dict[str, Any]) -> list[list[str]]:
+        rows: list[list[str]] = []
+        for audit_id, definition in self._SUPPORTING_METRICS.items():
             audit = audits.get(audit_id, {})
             numeric_value = audit.get("numericValue")
             if numeric_value is None:
@@ -312,11 +356,21 @@ class PerformanceTestRunner(TestRunner):
                 [
                     definition["label"],
                     self._format_metric_value(float(numeric_value), unit=definition["unit"]),
-                    self._metric_status(float(numeric_value), good=float(definition["good"]), needs_improvement=float(definition["needs_improvement"])),
+                    self._metric_status(
+                        float(numeric_value),
+                        good=float(definition["good"]),
+                        needs_improvement=float(definition["needs_improvement"]),
+                    ),
                 ]
             )
 
         return rows
+
+    @staticmethod
+    def _metric_interpretation(status: str, interpretation: str, degraded_causes: str) -> str:
+        if status == "Good":
+            return interpretation
+        return f"{interpretation} {degraded_causes}"
 
     @staticmethod
     def _metric_status(value: float, good: float, needs_improvement: float) -> str:
@@ -355,11 +409,15 @@ class PerformanceTestRunner(TestRunner):
 
             title = audit.get("title") or "Untitled opportunity"
             impact = float(savings_ms) + (float(savings_bytes) / 1024)
-            savings_text = self._format_savings(savings_ms=float(savings_ms), savings_bytes=float(savings_bytes))
-            candidates.append((impact, str(title), savings_text))
+            cause_impact = self._build_cause_impact_statement(
+                audit_key=str(title),
+                savings_ms=float(savings_ms),
+                savings_bytes=float(savings_bytes),
+            )
+            candidates.append((impact, str(title), cause_impact))
 
-        top_candidates = sorted(candidates, key=lambda item: item[0], reverse=True)[:5]
-        return [[title, savings] for _, title, savings in top_candidates]
+        top_candidates = sorted(candidates, key=lambda item: item[0], reverse=True)[:3]
+        return [[title, analysis] for _, title, analysis in top_candidates]
 
     @staticmethod
     def _format_savings(savings_ms: float, savings_bytes: float) -> str:
@@ -369,6 +427,19 @@ class PerformanceTestRunner(TestRunner):
         if savings_bytes > 0:
             segments.append(f"{int(round(savings_bytes / 1024))}KB")
         return " / ".join(segments)
+
+    def _build_cause_impact_statement(self, audit_key: str, savings_ms: float, savings_bytes: float) -> str:
+        key = audit_key.lower()
+        likely_source = "asset delivery and main-thread contention"
+        if "redirect" in key:
+            likely_source = "redirect chains before final HTML response"
+        elif "javascript" in key or "script" in key:
+            likely_source = "large JavaScript payloads and execution cost"
+        elif "render-block" in key or "render blocking" in key:
+            likely_source = "render-blocking CSS/JS in the critical path"
+
+        savings = self._format_savings(savings_ms=savings_ms, savings_bytes=savings_bytes)
+        return f"• Cause: {likely_source}. • Impact: Lighthouse estimates recoverable latency/transfer of {savings}."
 
     @staticmethod
     def _grade(score: int) -> str:
@@ -383,9 +454,10 @@ class PerformanceTestRunner(TestRunner):
         return "F"
 
     @staticmethod
-    def _recommendations(score: int) -> list[dict[str, str]]:
-        if score < 60:
-            return [{"severity": "critical", "text": "Improve page performance: reduce JS/CSS and optimize assets."}]
-        if score < 80:
-            return [{"severity": "warning", "text": "Improve Core Web Vitals by optimizing render-blocking resources."}]
-        return [{"severity": "info", "text": "Performance posture is healthy; continue monitoring."}]
+    def _recommendations(core_web_vitals_rows: list[list[str]]) -> list[dict[str, str]]:
+        statuses = [row[2] for row in core_web_vitals_rows if len(row) >= 3]
+        if any(status == "Poor" for status in statuses):
+            return [{"severity": "critical", "text": "At least one Core Web Vital is Poor; targeted optimization is required before release confidence is high."}]
+        if statuses and all(status == "Good" for status in statuses):
+            return [{"severity": "info", "text": "All Core Web Vitals are Good; performance posture is healthy. Continue monitoring for regressions."}]
+        return [{"severity": "warning", "text": "Core Web Vitals are mixed (Good/Needs Improvement); prioritize bottlenecks in critical rendering and JavaScript execution."}]
