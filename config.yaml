@@ -1,0 +1,42 @@
+domains:
+  - genwayhome.com
+  - openmortgage.com
+  - toolkit.genwayhome.org
+
+client_info:
+  name: "GenWay Home Mortgage"
+  contact: "Security Team"
+
+tests:
+  enabled:
+    - ssl_labs
+    - mozilla_observatory
+    - dns_lookup
+    - dnssec
+    - spf
+    - dkim
+    - dmarc
+    - blacklist
+    - subdomains
+    - security_headers
+    - cookies
+    - performance
+    - open_ports
+
+  disabled:
+    - vulnerability_scan
+
+api_keys:
+  google_pagespeed: ""
+  mxtoolbox: ""
+
+output:
+  format: "docx"
+  filename_template: "EAST_{client}_{date}.docx"
+  include_raw_data: true
+  screenshots: true
+
+branding:
+  logo: "assets/logo.png"
+  company_name: "Your Security Company"
+  color_scheme: "professional"
