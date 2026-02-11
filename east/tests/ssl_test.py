@@ -1,9 +1,13 @@
-"""SSL Labs test runner for EAST tool (API v4).
+"""SSL Labs test runner for EAST tool (API v4) with local-TLS fallback.
 
 API v4 requires one-time registration via the ``ssllabs-scan-v4-register``
 CLI tool shipped with the ssllabs-scan reference client.  After registering,
 pass the registered email address to this runner via the ``email`` parameter
 (CLI: ``--ssllabs-email``, config: ``ssllabs_email``).
+
+If SSL Labs is unavailable or rate-limited the runner can optionally fall
+back to a local TLS probe (sslyze → testssl.sh → openssl) and map the
+results into the same ``TestResult`` shape expected by the report.
 
 Reference: https://github.com/ssllabs/ssllabs-scan
 """
@@ -53,6 +57,17 @@ REGISTRATION_HELP = (
     "       Config: ssllabs_email: registered@example.com"
 )
 
+# ---------------------------------------------------------------------------
+# Fallback-related constants
+# ---------------------------------------------------------------------------
+_SSLLABS_FAILURE_REASONS = frozenset({
+    "no_email",
+    "api_not_responding",
+    "api_error",
+    "poll_timeout",
+    "exception",
+})
+
 
 class SSLLabsTestRunner(TestRunner):
     """Run SSL/TLS analysis using the SSL Labs API v4.
@@ -66,15 +81,33 @@ class SSLLabsTestRunner(TestRunner):
     use_cache : bool
         When True (default), request cached results first (``fromCache=on``).
         When False, always start a fresh assessment.
+    fallback_enabled : bool
+        When True, a local TLS probe is attempted if SSL Labs fails.
+    fallback_tool_preference : list[str] | None
+        Ordered tool names for local fallback (default: sslyze, testssl, openssl).
+    fallback_timeout : int
+        Timeout in seconds for the local probe (default 120).
     """
 
     name = "ssl_labs"
     description = "SSL/TLS Certificate & Configuration Analysis (API v4)"
 
-    def __init__(self, domain: str, *, email: str = "", use_cache: bool = True):
+    def __init__(
+        self,
+        domain: str,
+        *,
+        email: str = "",
+        use_cache: bool = True,
+        fallback_enabled: bool = False,
+        fallback_tool_preference: Optional[list[str]] = None,
+        fallback_timeout: int = 120,
+    ):
         super().__init__(domain)
         self.email = email
         self.use_cache = use_cache
+        self.fallback_enabled = fallback_enabled
+        self.fallback_tool_preference = fallback_tool_preference
+        self.fallback_timeout = fallback_timeout
 
     # ------------------------------------------------------------------
     # Convenience wrappers that inject SSL Labs retry settings
@@ -112,12 +145,49 @@ class SSLLabsTestRunner(TestRunner):
     # ------------------------------------------------------------------
 
     def run(self) -> TestResult:
-        """Execute SSL Labs scan and return results."""
+        """Execute SSL Labs scan and return results.
+
+        If SSL Labs fails and ``fallback_enabled`` is True, a local TLS
+        probe is attempted.  The returned ``TestResult`` has the same
+        shape regardless of which engine produced the data.
+        """
+        ssllabs_error: Optional[str] = None
+        fallback_reason: Optional[str] = None
+
+        # ── Attempt SSL Labs ──────────────────────────────────────────
         if not self.email:
-            return self._create_error_result(
-                f"No email provided for SSL Labs API v4.\n{REGISTRATION_HELP}"
+            ssllabs_error = f"No email provided for SSL Labs API v4.\n{REGISTRATION_HELP}"
+            fallback_reason = "no_email"
+        else:
+            ssllabs_error, fallback_reason = self._try_ssllabs()
+
+        # SSL Labs succeeded — _try_ssllabs stores result and returns (None, None)
+        if ssllabs_error is None:
+            return self._last_result  # set by _try_ssllabs on success
+
+        # ── Attempt local fallback ────────────────────────────────────
+        if self.fallback_enabled:
+            self.logger.warning(
+                "SSL Labs failed for %s (reason=%s). Attempting local TLS fallback.",
+                self.domain, fallback_reason,
+            )
+            local_result = self._run_local_fallback(fallback_reason or "unknown")
+            if local_result is not None:
+                return local_result
+            self.logger.error(
+                "Local TLS fallback also failed for %s", self.domain,
             )
 
+        # ── No fallback or fallback also failed ──────────────────────
+        return self._create_error_result(ssllabs_error)
+
+    def _try_ssllabs(self) -> tuple[Optional[str], Optional[str]]:
+        """Run the SSL Labs API flow.
+
+        Returns ``(None, None)`` on success (result stored in
+        ``self._last_result``).  On failure returns
+        ``(error_message, fallback_reason)``.
+        """
         # ----- Check local cache first -----
         cached = get_cached(CACHE_SERVICE, self.domain, max_age=CACHE_MAX_AGE)
         if cached is not None:
@@ -132,37 +202,75 @@ class SSLLabsTestRunner(TestRunner):
                     "api_cache_request=skipped | startNew_triggered=False",
                     self.domain,
                 )
-                return self._parse_results(cached)
+                self._last_result = self._parse_results(cached)
+                return (None, None)
 
         try:
             data = self._start_or_fetch(self.use_cache)
 
             if data is None:
-                return self._create_error_result(
+                return (
                     "SSL Labs API is not responding. "
-                    "The service may be overloaded — try again later."
+                    "The service may be overloaded — try again later.",
+                    "api_not_responding",
                 )
 
             # Check for 4xx-style error body returned as JSON
             if "errors" in data:
                 msgs = "; ".join(e.get("message", str(e)) for e in data["errors"])
-                return self._create_error_result(f"SSL Labs error: {msgs}")
+                return (f"SSL Labs error: {msgs}", "api_error")
 
             # Poll until finished
             data = self._poll_for_results(data)
             if data is None:
-                return self._create_error_result(
-                    "SSL Labs analysis timed out or failed."
+                return (
+                    "SSL Labs analysis timed out or failed.",
+                    "poll_timeout",
                 )
 
             # ----- Persist to local cache -----
             set_cached(CACHE_SERVICE, self.domain, data)
 
-            return self._parse_results(data)
+            self._last_result = self._parse_results(data)
+            return (None, None)
 
         except Exception as e:
             logger.exception("SSL Labs test failed for %s", self.domain)
-            return self._create_error_result(str(e))
+            return (str(e), "exception")
+
+    # ------------------------------------------------------------------
+    # Local TLS fallback
+    # ------------------------------------------------------------------
+
+    def _run_local_fallback(self, reason: str) -> Optional[TestResult]:
+        """Run a local TLS probe and return a TestResult, or None."""
+        from east.tests.local_tls import run_local_tls_probe
+
+        probe_data = run_local_tls_probe(
+            self.domain,
+            tool_preference=self.fallback_tool_preference,
+            timeout=self.fallback_timeout,
+        )
+        if probe_data is None:
+            return None
+
+        engine_meta = {
+            "name": "local",
+            "tool": probe_data.get("tool", "unknown"),
+            "fallback_reason": reason,
+        }
+
+        return self._build_test_result(
+            grade=probe_data["grade"],
+            grade_trust_ignored=probe_data["grade"],
+            has_warnings=False,
+            cert_details=probe_data["certificate"],
+            protocol_details=probe_data["protocols"],
+            vulnerability_details=probe_data["vulnerabilities"],
+            ip_address=probe_data.get("ip_address", "N/A"),
+            server_name=probe_data.get("server_name", self.domain),
+            engine_meta=engine_meta,
+        )
 
     # ------------------------------------------------------------------
     # API interaction
@@ -366,18 +474,51 @@ class SSLLabsTestRunner(TestRunner):
         grade_trust = ep.get("gradeTrustIgnored", grade)
         has_warnings = ep.get("hasWarnings", False)
 
-        # Extract certificate details
         cert_details = self._extract_cert_details(ep)
         protocol_details = self._extract_protocol_details(ep)
         vulnerability_details = self._extract_vulnerabilities(ep)
 
-        # Generate visuals
-        visuals = {}
+        engine_meta = {"name": "ssllabs"}
 
-        # Grade badge
+        return self._build_test_result(
+            grade=grade,
+            grade_trust_ignored=grade_trust,
+            has_warnings=has_warnings,
+            cert_details=cert_details,
+            protocol_details=protocol_details,
+            vulnerability_details=vulnerability_details,
+            ip_address=ep.get("ipAddress", "N/A"),
+            server_name=ep.get("serverName", "N/A"),
+            engine_meta=engine_meta,
+        )
+
+    # ------------------------------------------------------------------
+    # Shared TestResult builder
+    # ------------------------------------------------------------------
+
+    def _build_test_result(
+        self,
+        *,
+        grade: str,
+        grade_trust_ignored: str,
+        has_warnings: bool,
+        cert_details: dict,
+        protocol_details: dict[str, bool],
+        vulnerability_details: dict[str, bool],
+        ip_address: str,
+        server_name: str,
+        engine_meta: dict[str, Any],
+    ) -> TestResult:
+        """Build a ``TestResult`` from normalised intermediate data.
+
+        This is the single code-path shared by both the SSL Labs and local
+        fallback engines, guaranteeing that the report-facing structure is
+        identical regardless of source.
+        """
+        # Generate visuals
+        visuals: dict[str, io.BytesIO] = {}
         visuals["grade_badge"] = create_grade_badge(grade, label="SSL Labs Grade")
 
-        # Certificate timeline
         not_before = cert_details.get("not_before")
         not_after = cert_details.get("not_after")
         if not_before and not_after:
@@ -385,7 +526,6 @@ class SSLLabsTestRunner(TestRunner):
                 not_before, not_after, domain=self.domain
             )
 
-        # Protocol support chart
         if protocol_details:
             visuals["protocol_chart"] = create_protocol_support_chart(protocol_details)
 
@@ -397,7 +537,7 @@ class SSLLabsTestRunner(TestRunner):
         )
 
         # Build tables
-        tables = []
+        tables: list[dict[str, Any]] = []
 
         # Certificate info table
         cert_table_rows = [
@@ -460,18 +600,25 @@ class SSLLabsTestRunner(TestRunner):
             summary=summary,
             details={
                 "grade": grade,
-                "grade_trust_ignored": grade_trust,
+                "grade_trust_ignored": grade_trust_ignored,
                 "has_warnings": has_warnings,
                 "certificate": cert_details,
                 "protocols": protocol_details,
                 "vulnerabilities": vulnerability_details,
-                "ip_address": ep.get("ipAddress", "N/A"),
-                "server_name": ep.get("serverName", "N/A"),
+                "ip_address": ip_address,
+                "server_name": server_name,
+                "_engine": engine_meta,
             },
-            recommendations=self._generate_recommendations(grade, cert_details, protocol_details, vulnerability_details),
+            recommendations=self._generate_recommendations(
+                grade, cert_details, protocol_details, vulnerability_details,
+            ),
             visuals=visuals,
             tables=tables,
         )
+
+    # ------------------------------------------------------------------
+    # SSL Labs data extraction helpers
+    # ------------------------------------------------------------------
 
     def _extract_cert_details(self, endpoint: dict) -> dict:
         """Extract certificate details from endpoint data."""

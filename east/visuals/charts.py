@@ -2,7 +2,7 @@
 
 import io
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import matplotlib
@@ -26,7 +26,7 @@ def create_certificate_timeline(
     """
     fig, ax = plt.subplots(1, 1, figsize=size, dpi=150)
 
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     days_total = (not_after - not_before).days
     days_remaining = (not_after - now).days
     days_elapsed = (now - not_before).days
