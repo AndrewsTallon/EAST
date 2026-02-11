@@ -48,6 +48,22 @@ async function request(method, path, body = null, signal = null) {
   return parseJsonSafe(res);
 }
 
+
+async function requestMultipart(method, path, formData, signal = null) {
+  const opts = {
+    method,
+    body: formData,
+  };
+  if (signal) opts.signal = signal;
+  log(method, path, '[multipart]');
+  const res = await fetch(`${BASE}${path}`, opts);
+  if (!res.ok) {
+    const detail = await parseJsonSafe(res).catch(() => ({ detail: res.statusText }));
+    throw new Error(detail.detail || `HTTP ${res.status}`);
+  }
+  return parseJsonSafe(res);
+}
+
 export const api = {
   /** Fetch available scanners from the backend. */
   getScanners(signal) {
@@ -57,6 +73,18 @@ export const api = {
   /** Start a new scan job. */
   startScan(payload, signal) {
     return request('POST', '/api/scan', payload, signal);
+  },
+
+  /** List uploaded logos for scan branding. */
+  listLogos(signal) {
+    return request('GET', '/api/logos', null, signal);
+  },
+
+  /** Upload a logo image for scan branding. */
+  uploadLogo(file, signal) {
+    const formData = new FormData();
+    formData.append('file', file);
+    return requestMultipart('POST', '/api/logos', formData, signal);
   },
 
   /** List jobs with optional filters. */

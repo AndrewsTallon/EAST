@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Optional
 from threading import Lock
 
-from fastapi import FastAPI, Form, HTTPException, Query, Request
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -33,6 +33,8 @@ app = FastAPI(title="EAST Web UI")
 DATA_DIR = Path(os.environ.get("EAST_DATA_DIR", "artifacts/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DB_PATH = DATA_DIR / "jobs.json"
+LOGOS_DIR = DATA_DIR / "logos"
+LOGOS_DIR.mkdir(parents=True, exist_ok=True)
 _JOBS_FILE_LOCK = Lock()
 DELETED_JOB_IDS: set[str] = set()
 
@@ -351,6 +353,51 @@ async def api_list_scanners():
             "description": getattr(cls, "description", ""),
         })
     return {"scanners": scanners}
+
+
+@app.get("/api/logos")
+async def api_list_logos():
+    """Return uploaded logos available for report branding."""
+    logos = []
+    for file_path in sorted(LOGOS_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True):
+        if not file_path.is_file():
+            continue
+        logos.append(
+            {
+                "name": file_path.name,
+                "path": str(file_path),
+                "uploaded_at": datetime.fromtimestamp(file_path.stat().st_mtime, tz=timezone.utc).isoformat(),
+            }
+        )
+    return {"logos": logos}
+
+
+@app.post("/api/logos")
+async def api_upload_logo(file: UploadFile = File(...)):
+    """Upload a logo image for use in future scans."""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="Missing logo filename")
+
+    suffix = Path(file.filename).suffix.lower()
+    allowed_extensions = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"}
+    if suffix not in allowed_extensions:
+        raise HTTPException(status_code=400, detail="Unsupported file type. Use PNG, JPG, GIF, BMP, or WEBP")
+
+    stem = Path(file.filename).stem.strip() or "logo"
+    safe_stem = "".join(ch for ch in stem if ch.isalnum() or ch in {"-", "_"})[:40] or "logo"
+    saved_name = f"{datetime.utcnow().strftime('%Y%m%d%H%M%S')}_{uuid.uuid4().hex[:8]}_{safe_stem}{suffix}"
+    saved_path = LOGOS_DIR / saved_name
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    saved_path.write_bytes(payload)
+
+    return {
+        "name": saved_name,
+        "path": str(saved_path),
+        "uploaded_at": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat(),
+    }
 
 
 @app.post("/api/scan")

@@ -40,9 +40,15 @@ export async function renderNewScan(container, signal) {
       </div>
 
       <div class="form-group">
-        <label class="form-label">Logo Path (Optional)</label>
-        <input type="text" class="form-input" id="logoPathInput" placeholder="e.g. assets/logo.png" value="${escapeHtml(cloneData?.config_snapshot?.logo_path || '')}">
-        <div class="form-hint">Provide a local path on the EAST server to render your logo on the report cover.</div>
+        <label class="form-label">Logo (Optional)</label>
+        <div class="logo-controls">
+          <select class="form-select" id="logoSelect">
+            <option value="">No logo</option>
+          </select>
+          <label class="btn btn-secondary btn-sm logo-upload-btn" for="logoFileInput">Upload Logo</label>
+          <input type="file" id="logoFileInput" class="logo-file-input" accept=".png,.jpg,.jpeg,.gif,.bmp,.webp,image/*">
+        </div>
+        <div class="form-hint" id="logoHint">Select an existing uploaded logo, or upload a new one to use it immediately.</div>
       </div>
 
       <div class="form-group">
@@ -108,6 +114,8 @@ export async function renderNewScan(container, signal) {
     cloneData.domains.forEach(d => addDomain(d));
   }
 
+  let selectedLogoPath = cloneData?.config_snapshot?.logo_path || '';
+
   // Load scanners
   let scanners = [];
   let selectedScanners = new Set();
@@ -137,6 +145,76 @@ export async function renderNewScan(container, signal) {
   // --- Domain tag input ---
   const domainInput = document.getElementById('domainInput');
   const domainContainer = document.getElementById('domainContainer');
+  const logoSelect = document.getElementById('logoSelect');
+  const logoFileInput = document.getElementById('logoFileInput');
+  const logoHint = document.getElementById('logoHint');
+
+  async function refreshLogos({ preferredPath = selectedLogoPath } = {}) {
+    try {
+      const data = await api.listLogos(signal);
+      if (signal && signal.aborted) return;
+      const logos = data.logos || [];
+
+      logoSelect.innerHTML = '<option value="">No logo</option>';
+      logos.forEach(logo => {
+        const option = document.createElement('option');
+        option.value = logo.path;
+        option.textContent = logo.name;
+        if (preferredPath && preferredPath === logo.path) {
+          option.selected = true;
+        }
+        logoSelect.appendChild(option);
+      });
+
+      if (preferredPath && !logos.some(l => l.path === preferredPath)) {
+        const customOption = document.createElement('option');
+        customOption.value = preferredPath;
+        customOption.textContent = `${preferredPath} (from cloned scan)`;
+        customOption.selected = true;
+        logoSelect.appendChild(customOption);
+      }
+
+      if (logoSelect.value !== preferredPath) {
+        logoSelect.value = preferredPath || '';
+      }
+      selectedLogoPath = logoSelect.value;
+      logoHint.textContent = logos.length
+        ? 'Select an existing uploaded logo, or upload a new one to use it immediately.'
+        : 'No logos uploaded yet. Upload one to use it for this scan and future scans.';
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      logoHint.textContent = `Unable to load saved logos: ${err.message}`;
+      logoHint.style.color = 'var(--error-text)';
+    }
+  }
+
+  refreshLogos();
+
+  logoSelect.addEventListener('change', () => {
+    selectedLogoPath = logoSelect.value;
+  });
+
+  logoFileInput.addEventListener('change', async () => {
+    const file = logoFileInput.files?.[0];
+    if (!file) return;
+
+    logoHint.textContent = 'Uploading logo...';
+    logoHint.style.color = 'var(--text-muted)';
+
+    try {
+      const uploaded = await api.uploadLogo(file, signal);
+      selectedLogoPath = uploaded.path;
+      await refreshLogos({ preferredPath: selectedLogoPath });
+      toast('Logo uploaded successfully', 'success');
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      toast(`Failed to upload logo: ${err.message}`, 'error');
+      logoHint.textContent = `Upload failed: ${err.message}`;
+      logoHint.style.color = 'var(--error-text)';
+    } finally {
+      logoFileInput.value = '';
+    }
+  });
 
   domainInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === 'Tab' || e.key === ',') {
@@ -253,7 +331,7 @@ export async function renderNewScan(container, signal) {
     const email = document.getElementById('ssllabsEmail').value.trim();
     const useCache = document.getElementById('ssllabsCache').checked;
     const companyName = document.getElementById('companyNameInput').value.trim();
-    const logoPath = document.getElementById('logoPathInput').value.trim();
+    const logoPath = selectedLogoPath.trim();
 
     if (!domains.length) {
       toast('Please add at least one domain', 'error');
