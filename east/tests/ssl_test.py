@@ -18,6 +18,7 @@ import requests
 
 from east.tests.base import TestRunner, TestResult
 from east.utils.http import get_json, DEFAULT_HEADERS
+from east.utils.cache import get_cached, set_cached
 from east.visuals.badges import create_grade_badge, create_status_badge
 from east.visuals.charts import create_certificate_timeline, create_protocol_support_chart
 
@@ -32,12 +33,9 @@ ANALYZE_ENDPOINT = f"{SSL_LABS_API}/analyze"
 MAX_POLL_ATTEMPTS = 80
 POLL_INTERVAL = 15  # seconds — SSL Labs scans take minutes; no point hammering
 
-# Retry / backoff tuning for SSL Labs.
-# 429/529/502/503 are all treated as "overloaded; back off".
-# The schedule gives a total window of ~8 minutes before giving up.
-SSLLABS_OVERLOAD_STATUSES = {429, 502, 503, 529}
-SSLLABS_OVERLOAD_BACKOFF = [10, 20, 40, 60, 90, 120]  # seconds
-SSLLABS_MAX_RETRIES = 6
+# Cache settings
+CACHE_SERVICE = "ssllabs"
+CACHE_MAX_AGE = 86400  # 24 hours
 
 REGISTRATION_HELP = (
     "SSL Labs API v4 requires a registered email address.\n"
@@ -79,6 +77,13 @@ class SSLLabsTestRunner(TestRunner):
     def _ssllabs_get(self, params: dict, timeout: int = 60) -> Optional[dict]:
         """GET the analyze endpoint with SSL-Labs-specific retry settings.
 
+        Uses ``ssllabs_mode=True`` which activates the per-status-code
+        cooldown behaviour mandated by the SSL Labs v4 API documentation:
+          - 529 → 30 min cooldown, single retry
+          - 503 → 15 min cooldown, single retry
+          - 429 → exponential backoff 30s–10min with jitter
+          - other 5xx → standard backoff with jitter, max 5 attempts
+
         The registered *email* is sent as an HTTP header (required by API v4)
         rather than as a query parameter.
         """
@@ -88,9 +93,8 @@ class SSLLabsTestRunner(TestRunner):
             params=params,
             headers=headers,
             timeout=timeout,
-            retries=SSLLABS_MAX_RETRIES,
-            overload_statuses=SSLLABS_OVERLOAD_STATUSES,
-            overload_backoff_schedule=SSLLABS_OVERLOAD_BACKOFF,
+            retries=5,
+            ssllabs_mode=True,
             jitter=True,
         )
 
@@ -104,6 +108,17 @@ class SSLLabsTestRunner(TestRunner):
             return self._create_error_result(
                 f"No email provided for SSL Labs API v4.\n{REGISTRATION_HELP}"
             )
+
+        # ----- Check local cache first -----
+        cached = get_cached(CACHE_SERVICE, self.domain, max_age=CACHE_MAX_AGE)
+        if cached is not None:
+            status = cached.get("status")
+            if status == "READY":
+                self.logger.info(
+                    "Using locally cached SSL Labs result for %s (< 24h old)",
+                    self.domain,
+                )
+                return self._parse_results(cached)
 
         try:
             data = self._start_or_fetch(self.use_cache)
@@ -125,6 +140,9 @@ class SSLLabsTestRunner(TestRunner):
                 return self._create_error_result(
                     "SSL Labs analysis timed out or failed."
                 )
+
+            # ----- Persist to local cache -----
+            set_cached(CACHE_SERVICE, self.domain, data)
 
             return self._parse_results(data)
 

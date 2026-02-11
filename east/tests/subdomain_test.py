@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 CRT_SH_URL = "https://crt.sh/"
 
+# crt.sh query parameters — exclude expired certs, request JSON output
+CRT_SH_PARAMS_TEMPLATE = {"exclude": "expired", "output": "json"}
+
 RESOLVER_TIMEOUT = 5
 RESOLVER_LIFETIME = 10
 
@@ -71,11 +74,15 @@ class SubdomainTestRunner(TestRunner):
         subdomains = set()
 
         try:
+            params = dict(CRT_SH_PARAMS_TEMPLATE)
+            params["q"] = f"%.{self.domain}"
             data = get_json(
                 CRT_SH_URL,
-                params={"q": f"%.{self.domain}", "output": "json"},
+                params=params,
                 timeout=30,
-                retries=2,
+                retries=3,
+                no_retry_on_404=True,
+                jitter=True,
             )
 
             if data and isinstance(data, list):

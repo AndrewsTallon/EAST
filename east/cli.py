@@ -21,6 +21,7 @@ from east.report import EASTReportGenerator
 from east.scan_engine import ScanEngine
 from east.tests.base import TestResult
 from east.utils.validators import validate_domain, sanitize_domain
+from east.utils.http import log_call_summary
 
 console = Console()
 
@@ -220,6 +221,9 @@ def _run_scan(config: EASTConfig, test_filter: list[str] | None, output: str, ve
             on_log=lambda msg: logging.getLogger("east.scan").info(msg),
         )
     )
+
+    # Log HTTP call summary (visible at INFO level when --verbose)
+    log_call_summary()
 
     # Print summary
     _print_results_summary(all_results)
