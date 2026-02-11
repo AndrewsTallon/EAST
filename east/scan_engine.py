@@ -49,7 +49,15 @@ class ScanEngine:
                     on_log(f"[{domain}] Starting test: {test_name}")
                 try:
                     if test_name == "ssl_labs":
-                        runner = runner_cls(domain, email=config.ssllabs_email, use_cache=config.ssllabs_usecache)
+                        fb = config.ssl_fallback
+                        runner = runner_cls(
+                            domain,
+                            email=config.ssllabs_email,
+                            use_cache=config.ssllabs_usecache,
+                            fallback_enabled=fb.enabled,
+                            fallback_tool_preference=fb.tool_preference,
+                            fallback_timeout=fb.timeout,
+                        )
                     elif test_name == "performance":
                         runner = runner_cls(domain, pagespeed_key=config.api_keys.google_pagespeed)
                     else:

@@ -205,12 +205,19 @@ def _run_scan(config: EASTConfig, test_filter: list[str] | None, output: str, ve
 
     # Validate SSL Labs email requirement before starting any scans
     if "ssl_labs" in tests_to_run and not config.ssllabs_email:
-        from east.tests.ssl_test import REGISTRATION_HELP
-        console.print(
-            f"[red]Error:[/red] SSL Labs API v4 requires a registered email address.\n"
-            f"{REGISTRATION_HELP}"
-        )
-        sys.exit(1)
+        if config.ssl_fallback.enabled:
+            console.print(
+                "[yellow]Warning:[/yellow] No SSL Labs email provided. "
+                "Local TLS fallback is enabled — will use local probing."
+            )
+        else:
+            from east.tests.ssl_test import REGISTRATION_HELP
+            console.print(
+                f"[red]Error:[/red] SSL Labs API v4 requires a registered email address.\n"
+                f"{REGISTRATION_HELP}\n\n"
+                f"Alternatively, enable local TLS fallback in config: ssl_fallback.enabled: true"
+            )
+            sys.exit(1)
 
     console.print("[dim]Running tests in asynchronous mode with safe per-service rate limits...[/dim]")
     engine = ScanEngine(TEST_REGISTRY)

@@ -44,6 +44,17 @@ class APIKeys:
 
 
 @dataclass
+class SSLFallbackConfig:
+    """Controls local-TLS fallback when SSL Labs is unavailable."""
+    enabled: bool = False
+    tool_preference: list[str] = field(default_factory=lambda: [
+        "sslyze", "testssl", "openssl",
+    ])
+    timeout: int = 120
+    retries: int = 5
+
+
+@dataclass
 class EASTConfig:
     domains: list[str] = field(default_factory=list)
     client_info: ClientInfo = field(default_factory=ClientInfo)
@@ -53,6 +64,7 @@ class EASTConfig:
     api_keys: APIKeys = field(default_factory=APIKeys)
     ssllabs_email: str = ""
     ssllabs_usecache: bool = True
+    ssl_fallback: SSLFallbackConfig = field(default_factory=SSLFallbackConfig)
 
     @classmethod
     def from_yaml(cls, path: str) -> "EASTConfig":
@@ -112,6 +124,17 @@ class EASTConfig:
 
         if "ssllabs_usecache" in data:
             config.ssllabs_usecache = bool(data["ssllabs_usecache"])
+
+        if "ssl_fallback" in data:
+            fb = data["ssl_fallback"]
+            config.ssl_fallback = SSLFallbackConfig(
+                enabled=fb.get("enabled", False),
+                tool_preference=fb.get("tool_preference", [
+                    "sslyze", "testssl", "openssl",
+                ]),
+                timeout=fb.get("timeout", 120),
+                retries=fb.get("retries", 5),
+            )
 
         return config
 

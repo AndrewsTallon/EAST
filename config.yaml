@@ -31,6 +31,17 @@ tests:
 ssllabs_email: ""
 ssllabs_usecache: true
 
+# Local TLS fallback when SSL Labs is unavailable / rate-limited.
+# Uses sslyze → testssl.sh → openssl in order of preference.
+ssl_fallback:
+  enabled: false
+  tool_preference:
+    - sslyze
+    - testssl
+    - openssl
+  timeout: 120       # seconds per local probe attempt
+  retries: 5         # SSL Labs retry count before fallback kicks in
+
 api_keys:
   google_pagespeed: ""
   mxtoolbox: ""
