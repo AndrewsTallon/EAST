@@ -187,6 +187,8 @@ class ScanRequest(BaseModel):
     tests: list[str] | None = None
     ssllabs_email: str = ""
     ssllabs_usecache: bool = True
+    company_name: str = ""
+    logo_path: str = ""
 
 
 JOBS: dict[str, JobState] = {}
@@ -367,6 +369,11 @@ async def api_start_scan(req: ScanRequest):
         config.ssllabs_email = req.ssllabs_email
     config.ssllabs_usecache = req.ssllabs_usecache
 
+    if req.company_name.strip():
+        config.branding.company_name = req.company_name.strip()
+    if req.logo_path.strip():
+        config.branding.logo = req.logo_path.strip()
+
     selected_tests = req.tests if req.tests else _get_tests_to_run(config)
 
     job_id = str(uuid.uuid4())
@@ -381,6 +388,8 @@ async def api_start_scan(req: ScanRequest):
             "tests": selected_tests,
             "ssllabs_email": req.ssllabs_email,
             "ssllabs_usecache": req.ssllabs_usecache,
+            "company_name": config.branding.company_name,
+            "logo_path": config.branding.logo,
         },
     )
     JOBS[job_id] = job
