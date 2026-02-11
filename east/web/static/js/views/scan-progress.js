@@ -1,6 +1,14 @@
 /**
  * Scan Progress / Detail View
  * Shows live progress during execution and full results when complete.
+ *
+ * Lifecycle safety:
+ * - Accepts AbortSignal from router; all fetches use it.
+ * - Uses getJobWithRetry for initial load to avoid spurious "Scan Not Found".
+ * - Single completion path: a `done` flag prevents SSE + poll race.
+ * - `loadJob` is guarded against concurrent invocation.
+ * - Cleanup closes SSE, clears all intervals, and sets `destroyed` flag
+ *   so no stale callbacks touch the DOM.
  */
 import { api } from '../api.js';
 import {
@@ -8,7 +16,10 @@ import {
   escapeHtml, scannerDisplay, scannerIcon, scoreClass, toast,
 } from '../utils.js';
 
-export async function renderScanProgress(container, jobId) {
+const DEBUG = typeof window !== 'undefined' && window.EAST_DEBUG;
+function log(...args) { if (DEBUG) console.log('[EAST:scan-progress]', ...args); }
+
+export async function renderScanProgress(container, jobId, signal) {
   container.innerHTML = `
     <div class="page-header" id="scanHeader">
       <div class="skeleton skeleton-title"></div>
@@ -20,10 +31,17 @@ export async function renderScanProgress(container, jobId) {
   let eventSource = null;
   let pollInterval = null;
   let timerInterval = null;
+  let destroyed = false;     // set true on cleanup — no more DOM writes
+  let loading = false;       // guard against concurrent loadJob calls
+  let completionHandled = false; // single completion path
 
   async function loadJob() {
+    if (destroyed || loading) return;
+    loading = true;
     try {
-      const job = await api.getJob(jobId);
+      const job = await api.getJobWithRetry(jobId, signal);
+      if (destroyed) return;
+
       renderHeader(job);
 
       if (job.status === 'running' || job.status === 'queued') {
@@ -33,21 +51,29 @@ export async function renderScanProgress(container, jobId) {
         renderCompleted(job);
       }
     } catch (err) {
+      if (destroyed || (err.name === 'AbortError')) return;
+
       container.innerHTML = `
         <div class="empty-state">
           <div class="empty-state-title">Scan Not Found</div>
           <div class="empty-state-desc">${escapeHtml(err.message)}</div>
           <a href="#/" class="btn btn-primary">Back to Dashboard</a>
         </div>`;
+    } finally {
+      loading = false;
     }
   }
 
   function renderHeader(job) {
+    if (destroyed) return;
+    const headerEl = document.getElementById('scanHeader');
+    if (!headerEl) return;
+
     const duration = job.completed_at
       ? formatDuration(job.created_at, job.completed_at)
       : `<span id="liveTimer">${elapsedSince(job.created_at)}</span>`;
 
-    document.getElementById('scanHeader').innerHTML = `
+    headerEl.innerHTML = `
       <div class="page-header-row">
         <div>
           <h1 class="page-title">${escapeHtml(job.client || 'Scan')} ${statusBadge(job.status)}</h1>
@@ -78,7 +104,7 @@ export async function renderScanProgress(container, jobId) {
     if (jsonBtn) {
       jsonBtn.addEventListener('click', async () => {
         try {
-          const data = await api.getResults(jobId);
+          const data = await api.getResults(jobId, signal);
           const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a');
@@ -87,6 +113,7 @@ export async function renderScanProgress(container, jobId) {
           a.click();
           URL.revokeObjectURL(url);
         } catch (err) {
+          if (err.name === 'AbortError') return;
           toast('Failed to download JSON: ' + err.message, 'error');
         }
       });
@@ -94,6 +121,10 @@ export async function renderScanProgress(container, jobId) {
   }
 
   function renderProgress(job) {
+    if (destroyed) return;
+    const bodyEl = document.getElementById('scanBody');
+    if (!bodyEl) return;
+
     const testEntries = Object.entries(job.test_status || {});
     const total = testEntries.length;
     const done = testEntries.filter(([, s]) => s === 'success' || s === 'failed').length;
@@ -137,12 +168,15 @@ export async function renderScanProgress(container, jobId) {
         <div class="log-viewer" id="logViewer"></div>
       </div>`;
 
-    document.getElementById('scanBody').innerHTML = html;
+    bodyEl.innerHTML = html;
   }
 
   function startLiveUpdates(job) {
+    if (destroyed) return;
+
     // Timer
     timerInterval = setInterval(() => {
+      if (destroyed) return;
       const el = document.getElementById('liveTimer');
       if (el) el.textContent = elapsedSince(job.created_at);
     }, 1000);
@@ -152,7 +186,9 @@ export async function renderScanProgress(container, jobId) {
     eventSource = api.streamLogs(
       jobId,
       (data) => {
-        if (logViewer) {
+        if (destroyed) return;
+
+        if (logViewer && logViewer.isConnected) {
           const line = document.createElement('div');
           line.className = 'log-line';
           const parts = data.line.split(' ');
@@ -168,42 +204,64 @@ export async function renderScanProgress(container, jobId) {
           logViewer.scrollTop = logViewer.scrollHeight;
         }
 
-        // Check if done
-        if (data.status === 'completed' || data.status === 'failed') {
-          cleanup();
-          loadJob(); // Reload full view
+        // Check if done — single completion path
+        if ((data.status === 'completed' || data.status === 'failed') && !completionHandled) {
+          completionHandled = true;
+          log('completion via SSE');
+          stopLiveUpdates();
+          loadJob();
         }
       },
       () => {
-        // SSE error - fall back to polling
-        startPolling();
+        // SSE error — fall back to polling only if we don't already have one
+        if (!destroyed && !pollInterval) {
+          log('SSE error, starting fallback poll');
+          startPolling();
+        }
       }
     );
 
-    // Also poll job status to update progress cards
+    // Poll job status to update progress cards (incremental, not full re-render)
     pollInterval = setInterval(async () => {
+      if (destroyed || completionHandled) return;
       try {
-        const updated = await api.getJob(jobId);
+        const updated = await api.getJob(jobId, signal);
+        if (destroyed || completionHandled) return;
+
         if (updated.status === 'completed' || updated.status === 'failed') {
-          cleanup();
-          loadJob();
+          if (!completionHandled) {
+            completionHandled = true;
+            log('completion via poll');
+            stopLiveUpdates();
+            loadJob();
+          }
           return;
         }
         // Update progress grid without full re-render
         updateProgressCards(updated.test_status);
         updateProgressBar(updated.test_status);
-      } catch (e) { /* ignore */ }
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        /* ignore transient errors */
+      }
     }, 2000);
   }
 
   function startPolling() {
-    if (pollInterval) return; // Already polling
+    if (destroyed || pollInterval) return; // Already polling or destroyed
     pollInterval = setInterval(async () => {
+      if (destroyed || completionHandled) return;
       try {
-        const updated = await api.getJob(jobId);
+        const updated = await api.getJob(jobId, signal);
+        if (destroyed || completionHandled) return;
+
         if (updated.status === 'completed' || updated.status === 'failed') {
-          cleanup();
-          loadJob();
+          if (!completionHandled) {
+            completionHandled = true;
+            log('completion via fallback poll');
+            stopLiveUpdates();
+            loadJob();
+          }
           return;
         }
         renderProgress(updated);
@@ -224,12 +282,15 @@ export async function renderScanProgress(container, jobId) {
           }
           logViewer.scrollTop = logViewer.scrollHeight;
         }
-      } catch (e) { /* ignore */ }
+      } catch (e) {
+        if (e.name === 'AbortError') return;
+        /* ignore transient errors */
+      }
     }, 3000);
   }
 
   function updateProgressCards(testStatus) {
-    if (!testStatus) return;
+    if (destroyed || !testStatus) return;
     for (const [key, status] of Object.entries(testStatus)) {
       const cards = document.querySelectorAll('.test-progress-card');
       for (const card of cards) {
@@ -252,7 +313,7 @@ export async function renderScanProgress(container, jobId) {
   }
 
   function updateProgressBar(testStatus) {
-    if (!testStatus) return;
+    if (destroyed || !testStatus) return;
     const entries = Object.entries(testStatus);
     const total = entries.length;
     const done = entries.filter(([, s]) => s === 'success' || s === 'failed').length;
@@ -262,6 +323,10 @@ export async function renderScanProgress(container, jobId) {
   }
 
   function renderCompleted(job) {
+    if (destroyed) return;
+    const bodyEl = document.getElementById('scanBody');
+    if (!bodyEl) return;
+
     let html = '';
 
     // Config snapshot
@@ -404,7 +469,7 @@ export async function renderScanProgress(container, jobId) {
         </div>`;
     }
 
-    document.getElementById('scanBody').innerHTML = html;
+    bodyEl.innerHTML = html;
 
     // Domain tab switching
     document.querySelectorAll('.domain-tab').forEach(tab => {
@@ -454,10 +519,19 @@ export async function renderScanProgress(container, jobId) {
     return `<span class="${scoreClass(avg)}">${avg}</span>`;
   }
 
-  function cleanup() {
+  /** Stop all live update mechanisms (SSE, poll, timer) without setting destroyed. */
+  function stopLiveUpdates() {
     if (eventSource) { eventSource.close(); eventSource = null; }
     if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+    log('live updates stopped');
+  }
+
+  /** Full cleanup — called by router on navigation away. */
+  function cleanup() {
+    destroyed = true;
+    stopLiveUpdates();
+    log('cleanup (destroyed)');
   }
 
   // Initial load
