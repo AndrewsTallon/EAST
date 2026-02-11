@@ -1,3 +1,4 @@
+import base64
 import io
 import tempfile
 import unittest
@@ -58,6 +59,39 @@ class ReportGenerationTests(unittest.TestCase):
             for row in overview_table.rows:
                 self.assertEqual(row.height_rule, WD_ROW_HEIGHT_RULE.EXACTLY)
                 self.assertAlmostEqual(row.height.inches, 0.7, places=2)
+
+    def test_screenshot_visual_is_embedded_in_report(self):
+        config = EASTConfig.default()
+        config.domains = ["example.com"]
+        config.branding.logo = "assets/missing-logo.png"
+
+        generator = EASTReportGenerator(config)
+
+        png_b64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAWJVMogAAAAASUVORK5CYII="
+        png_bytes = base64.b64decode(png_b64)
+
+        screenshot_result = TestResult(
+            test_name="screenshots",
+            domain="example.com",
+            success=True,
+            score=100,
+            grade="N/A",
+            summary="Screenshot captured",
+            details={"screenshot_path": "artifacts/screenshots/example_com.png"},
+            visuals={"website_screenshot": io.BytesIO(png_bytes)},
+            tables=[],
+        )
+
+        generator.add_results("example.com", [screenshot_result])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            output = Path(tmpdir) / "report.docx"
+            generator.generate(str(output))
+
+            doc = Document(str(output))
+            self.assertGreater(len(doc.inline_shapes), 0)
+            joined_text = "\n".join(p.text for p in doc.paragraphs)
+            self.assertIn("Captured Screenshot", joined_text)
 
 
 if __name__ == "__main__":

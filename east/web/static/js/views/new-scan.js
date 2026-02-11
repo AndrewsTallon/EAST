@@ -34,6 +34,18 @@ export async function renderNewScan(container, signal) {
       </div>
 
       <div class="form-group">
+        <label class="form-label">Your Cybersecurity Company</label>
+        <input type="text" class="form-input" id="companyNameInput" placeholder="e.g. Northstar Security" value="${escapeHtml(cloneData?.config_snapshot?.company_name || '')}">
+        <div class="form-hint">Used on the report cover page in place of the default company name.</div>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Logo Path (Optional)</label>
+        <input type="text" class="form-input" id="logoPathInput" placeholder="e.g. assets/logo.png" value="${escapeHtml(cloneData?.config_snapshot?.logo_path || '')}">
+        <div class="form-hint">Provide a local path on the EAST server to render your logo on the report cover.</div>
+      </div>
+
+      <div class="form-group">
         <label class="form-label">Target Domains</label>
         <div class="tag-input-container" id="domainContainer">
           <input type="text" class="tag-input" id="domainInput" placeholder="Type a domain and press Enter">
@@ -240,6 +252,8 @@ export async function renderNewScan(container, signal) {
     const client = document.getElementById('clientInput').value.trim();
     const email = document.getElementById('ssllabsEmail').value.trim();
     const useCache = document.getElementById('ssllabsCache').checked;
+    const companyName = document.getElementById('companyNameInput').value.trim();
+    const logoPath = document.getElementById('logoPathInput').value.trim();
 
     if (!domains.length) {
       toast('Please add at least one domain', 'error');
@@ -271,6 +285,8 @@ export async function renderNewScan(container, signal) {
         tests: [...selectedScanners],
         ssllabs_email: email,
         ssllabs_usecache: useCache,
+        company_name: companyName,
+        logo_path: logoPath,
       };
       const result = await api.startScan(payload, signal);
       toast('Scan started successfully', 'success');

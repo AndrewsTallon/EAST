@@ -561,7 +561,17 @@ class EASTReportGenerator:
             run.font.size = Pt(10)
 
         # Visuals
-        self._add_visuals(result.visuals)
+        visuals = dict(result.visuals or {})
+        if result.test_name == "screenshots" and "website_screenshot" not in visuals:
+            screenshot_path = str(result.details.get("screenshot_path", "")).strip()
+            if screenshot_path and os.path.exists(screenshot_path):
+                with open(screenshot_path, "rb") as img_file:
+                    visuals["website_screenshot"] = io.BytesIO(img_file.read())
+
+        if result.test_name == "screenshots" and "website_screenshot" in visuals:
+            self.document.add_heading("Captured Screenshot", level=3)
+
+        self._add_visuals(visuals)
 
         # Tables
         for table_data in result.tables:
@@ -601,7 +611,8 @@ class EASTReportGenerator:
             p = self.document.add_paragraph()
             p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             run = p.add_run()
-            self._safe_add_picture(run, buf, width=Inches(5.0), warning_context=f"visual {key}")
+            width = Inches(6.0) if key == "website_screenshot" else Inches(5.0)
+            self._safe_add_picture(run, buf, width=width, warning_context=f"visual {key}")
 
     def _safe_add_picture(
         self,
