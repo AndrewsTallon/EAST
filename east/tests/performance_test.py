@@ -4,6 +4,7 @@ import json
 import logging
 import ntpath
 import os
+import platform
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,15 @@ from east.tests.base import TestResult, TestRunner
 
 
 LOGGER = logging.getLogger(__name__)
+
+_CHROME_PATH_ENV_VARS = ("EAST_CHROME_PATH", "CHROME_PATH")
+_LINUX_CHROME_CANDIDATES = (
+    "/usr/bin/chromium",
+    "/usr/bin/chromium-browser",
+    "/snap/bin/chromium",
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
+)
 
 
 class PerformanceTestRunner(TestRunner):
@@ -125,12 +135,15 @@ class PerformanceTestRunner(TestRunner):
         npm = shutil.which("npm") or shutil.which("npm.cmd")
         profile_base = self._prepare_profile_dir()
 
+        chrome_path, chrome_diag = self._resolve_chrome_binary()
+
         base_args = [
             f"https://{self.domain}",
             "--quiet",
             "--output=json",
             f"--output-path={output_path}",
             f"--chrome-flags={self._build_chrome_flags(profile_base)}",
+            f"--chrome-path={chrome_path}",
             "--only-categories=performance,accessibility,best-practices,seo",
         ]
 
@@ -138,6 +151,8 @@ class PerformanceTestRunner(TestRunner):
             "node_detected": bool(node),
             "npm_detected": bool(npm),
             "profile_dir": str(profile_base),
+            "chrome_path": chrome_path,
+            "chrome_resolution": chrome_diag,
         }
 
         if os.name != "nt":
@@ -151,10 +166,7 @@ class PerformanceTestRunner(TestRunner):
                 diag["executable"] = npx
                 return [npx, "--yes", "lighthouse", *base_args], diag
 
-            raise RuntimeError(
-                "Node.js/npm was not found. Install Node.js LTS and Lighthouse (`npm i -g lighthouse`) "
-                "or ensure `npx` is available in PATH."
-            )
+            raise RuntimeError(self._node_not_found_help())
 
         lighthouse_cmd = shutil.which("lighthouse.cmd") or shutil.which("lighthouse.bat") or shutil.which("lighthouse.exe")
         if lighthouse_cmd:
@@ -175,13 +187,18 @@ class PerformanceTestRunner(TestRunner):
             )
 
         if not node or not npm:
-            raise RuntimeError(
-                "Node.js/npm was not found. Install Node.js LTS, reopen terminal, and rerun EAST."
-            )
+            raise RuntimeError(self._node_not_found_help())
 
         raise RuntimeError(
             "Lighthouse CLI was not found as an executable shim. Install globally with `npm i -g lighthouse` "
             "or run with npm available so EAST can use `npx` automatically."
+        )
+
+    @staticmethod
+    def _node_not_found_help() -> str:
+        return (
+            "Node.js/npm was not found. Install Node.js LTS and Lighthouse (`npm i -g lighthouse`), "
+            "or ensure `npx` is available in PATH."
         )
 
     def _prepare_profile_dir(self) -> str:
@@ -211,11 +228,84 @@ class PerformanceTestRunner(TestRunner):
     def _build_chrome_flags(profile_base: str) -> str:
         """Build Chrome flags string for stable headless Lighthouse runs."""
         cache_dir = os.path.join(profile_base, "cache")
-        return (
+        flags = (
             "--headless=new --disable-gpu --no-first-run --no-default-browser-check "
             f"--user-data-dir={profile_base} "
             f"--disk-cache-dir={cache_dir}"
         )
+        # Required in many Linux server/container environments.
+        # --no-sandbox is needed when running as root or in hardened containers.
+        # --disable-dev-shm-usage avoids Chromium crashes when /dev/shm is tiny.
+        if os.name != "nt":
+            flags += " --no-sandbox --disable-dev-shm-usage"
+        return flags
+
+    @staticmethod
+    def _resolve_chrome_binary() -> tuple[str, str]:
+        """Resolve Chrome/Chromium executable path with env override support."""
+        for env_var in _CHROME_PATH_ENV_VARS:
+            value = (os.environ.get(env_var) or "").strip()
+            if not value:
+                continue
+            if os.path.isfile(value) and os.access(value, os.X_OK):
+                return value, f"env:{env_var}"
+            raise RuntimeError(
+                f"{env_var} is set to '{value}' but is not an executable browser binary. "
+                "Install Chromium/Chrome or fix the path."
+            )
+
+        candidates = [
+            "chromium",
+            "chromium-browser",
+            "google-chrome",
+            "google-chrome-stable",
+            "chrome",
+        ]
+        for name in candidates:
+            resolved = shutil.which(name)
+            if resolved:
+                return resolved, f"which:{name}"
+
+        if platform.system().lower() == "linux":
+            for path in _LINUX_CHROME_CANDIDATES:
+                if os.path.isfile(path) and os.access(path, os.X_OK):
+                    return path, "known-linux-path"
+
+        raise RuntimeError(
+            "Chrome/Chromium executable not found for Lighthouse. Install one of: "
+            "`sudo apt-get install -y chromium-browser` (or `chromium`) or Google Chrome. "
+            "Then set EAST_CHROME_PATH=/path/to/chrome (or CHROME_PATH)."
+        )
+
+    @staticmethod
+    def diagnose_lighthouse_prereqs() -> dict[str, Any]:
+        """Return diagnostic information used by CLI doctor command."""
+        diag: dict[str, Any] = {
+            "node": shutil.which("node"),
+            "npm": shutil.which("npm") or shutil.which("npm.cmd"),
+            "lighthouse": shutil.which("lighthouse") or shutil.which("lighthouse.cmd"),
+            "npx": shutil.which("npx") or shutil.which("npx.cmd"),
+            "chrome": None,
+            "chrome_version": None,
+            "errors": [],
+        }
+        try:
+            chrome_path, _ = PerformanceTestRunner._resolve_chrome_binary()
+            diag["chrome"] = chrome_path
+            version_proc = subprocess.run([chrome_path, "--version"], capture_output=True, text=True, timeout=8)
+            if version_proc.returncode == 0:
+                diag["chrome_version"] = version_proc.stdout.strip() or version_proc.stderr.strip()
+            else:
+                diag["errors"].append(
+                    f"Chrome binary exists but failed to report version (exit={version_proc.returncode})."
+                )
+        except Exception as exc:
+            diag["errors"].append(str(exc))
+        if not (diag["lighthouse"] or diag["npx"]):
+            diag["errors"].append("Lighthouse CLI not found (missing `lighthouse` and `npx`).")
+        if not (diag["node"] and diag["npm"]):
+            diag["errors"].append("Node.js/npm not found.")
+        return diag
 
     @staticmethod
     def _is_cleanup_eperm(error_text: str) -> bool:
@@ -293,6 +383,7 @@ class PerformanceTestRunner(TestRunner):
             f"executable={diag.get('executable', '<unresolved>')}; "
             f"node_detected={diag.get('node_detected')}; "
             f"npm_detected={diag.get('npm_detected')}; "
+            f"chrome_path={diag.get('chrome_path', '<unresolved>')}; "
             f"cmd={command_preview}"
         )
 

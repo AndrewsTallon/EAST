@@ -39,6 +39,36 @@ pip install -e .
 
 Additional local tools for new tests:
 
+
+### Linux server reliability checklist (Lighthouse + Playwright + SSL fallback)
+
+Run this once on the server as a sudo-capable user:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y nodejs npm chromium-browser openssl
+python -m playwright install --with-deps chromium
+pip install sslyze
+# Optional but recommended fallback tier:
+# git clone https://github.com/drwetter/testssl.sh.git /opt/testssl.sh
+# sudo ln -sf /opt/testssl.sh/testssl.sh /usr/local/bin/testssl.sh
+```
+
+Then validate with:
+
+```bash
+python -m east.cli doctor
+```
+
+Environment variables supported by EAST for deterministic server runtime:
+
+- `EAST_CHROME_PATH` (or `CHROME_PATH`): absolute Chrome/Chromium binary path used by Lighthouse.
+- `PLAYWRIGHT_BROWSERS_PATH`: shared browser cache path for Playwright binaries (useful with systemd/docker and non-root users).
+- `EAST_DATA_DIR`: directory where the web UI persists job metadata (`jobs.json`) so refresh/restart keeps scan history.
+
+Lighthouse runs with server-safe flags on Linux (`--no-sandbox --disable-dev-shm-usage`) in addition to headless flags.
+
+
 - Node.js + Lighthouse CLI (`npm i -g lighthouse`) for local performance scans
 - `nmap` for open ports scanning (gracefully skipped with clear report/log error if unavailable)
 - Playwright browsers for screenshots: `playwright install chromium`
