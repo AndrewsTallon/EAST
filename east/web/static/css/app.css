@@ -502,6 +502,34 @@ a:hover { color: var(--accent); }
   min-height: 80px;
 }
 
+
+.logo-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.logo-controls .form-select {
+  flex: 1 1 280px;
+  min-width: 220px;
+}
+
+.logo-upload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.logo-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
 /* --- Tag Input --- */
 .tag-input-container {
   display: flex;
