@@ -101,6 +101,11 @@ export const api = {
     return `/jobs/${jobId}/download`;
   },
 
+  /** Delete a job and any generated report artifact. */
+  deleteJob(jobId, signal) {
+    return request('DELETE', `/api/jobs/${jobId}`, null, signal);
+  },
+
   /**
    * Connect to the SSE log stream for a job.
    * Returns an EventSource instance. Caller must close it.

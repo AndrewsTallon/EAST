@@ -64,6 +64,21 @@ export async function renderScanProgress(container, jobId, signal) {
     }
   }
 
+
+  async function handleDelete() {
+    const ok = window.confirm('Delete this scan and its generated report file? This cannot be undone.');
+    if (!ok) return;
+
+    try {
+      await api.deleteJob(jobId, signal);
+      toast('Scan deleted', 'success');
+      location.hash = '#/reports';
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      toast('Failed to delete scan: ' + err.message, 'error');
+    }
+  }
+
   function renderHeader(job) {
     if (destroyed) return;
     const headerEl = document.getElementById('scanHeader');
@@ -95,6 +110,7 @@ export async function renderScanProgress(container, jobId, signal) {
             </button>
           ` : ''}
           <a href="#/scan/new?clone=${jobId}" class="btn btn-secondary">Clone Scan</a>
+          <button class="btn btn-danger" id="deleteScanBtn">Delete Scan</button>
         </div>
       </div>
     `;
@@ -116,6 +132,14 @@ export async function renderScanProgress(container, jobId, signal) {
           if (err.name === 'AbortError') return;
           toast('Failed to download JSON: ' + err.message, 'error');
         }
+      });
+    }
+
+
+    const deleteBtn = document.getElementById('deleteScanBtn');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', () => {
+        handleDelete();
       });
     }
   }
