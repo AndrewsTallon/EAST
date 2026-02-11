@@ -199,7 +199,7 @@ export async function renderReports(container, signal) {
             ${job.status === 'completed' ? `<a href="${api.downloadUrl(job.id)}" class="btn btn-ghost btn-sm" title="Download DOCX" download>
               <svg viewBox="0 0 20 20" fill="currentColor" style="width:14px;height:14px"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
             </a>
-            <a href="${api.downloadPackageUrl(job.id)}" class="btn btn-ghost btn-sm" title="Download ZIP package" download>
+            <a href="${api.downloadPackageUrl(job.id)}" class="btn btn-ghost btn-sm" title="Download DOCX + saved scanner artifacts" download>
               <svg viewBox="0 0 20 20" fill="currentColor" style="width:14px;height:14px"><path fill-rule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zm3.293-7.707a1 1 0 011.414 0L9 10.586V3a1 1 0 112 0v7.586l1.293-1.293a1 1 0 111.414 1.414l-3 3a1 1 0 01-1.414 0l-3-3a1 1 0 010-1.414z" clip-rule="evenodd"/></svg>
             </a>` : ''}
             <a href="#/scan/new?clone=${job.id}" class="btn btn-ghost btn-sm" title="Clone scan">
