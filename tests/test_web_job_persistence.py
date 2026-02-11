@@ -67,6 +67,8 @@ class WebJobPersistenceTests(unittest.TestCase):
     def test_delete_job_removes_record_and_report_file(self):
         report_path = Path(self.tmp.name) / "report.docx"
         report_path.write_text("dummy", encoding="utf-8")
+        package_path = Path(self.tmp.name) / "report_package.zip"
+        package_path.write_text("dummy", encoding="utf-8")
 
         web_app.JOBS["delete-me"] = web_app.JobState(
             id="delete-me",
@@ -77,6 +79,7 @@ class WebJobPersistenceTests(unittest.TestCase):
             tests=["ssl_labs"],
             client="Delete Worker",
             output_path=str(report_path),
+            package_path=str(package_path),
         )
         web_app._save_jobs_to_disk()
 
@@ -85,6 +88,7 @@ class WebJobPersistenceTests(unittest.TestCase):
         self.assertEqual(result, {"deleted": True, "job_id": "delete-me"})
         self.assertNotIn("delete-me", web_app.JOBS)
         self.assertFalse(report_path.exists())
+        self.assertFalse(package_path.exists())
 
         disk_jobs = json.loads(web_app.JOBS_DB_PATH.read_text(encoding="utf-8"))["jobs"]
         self.assertFalse(any(job["id"] == "delete-me" for job in disk_jobs))
@@ -102,6 +106,7 @@ class WebJobPersistenceTests(unittest.TestCase):
                     "domains": ["external.example"],
                     "tests": ["security_headers"],
                     "output_path": "artifacts/web/report.docx",
+                    "package_path": "artifacts/web/report_package.zip",
                     "results": {"external.example": []},
                     "test_status": {"external.example:security_headers": "success"},
                     "config_snapshot": {},
@@ -117,6 +122,10 @@ class WebJobPersistenceTests(unittest.TestCase):
         self.assertIn("external-job", web_app.JOBS)
         self.assertEqual(web_app.JOBS["external-job"].status, "completed")
         self.assertEqual(web_app.JOBS["external-job"].domains, ["external.example"])
+        self.assertEqual(
+            web_app.JOBS["external-job"].package_path,
+            "artifacts/web/report_package.zip",
+        )
 
 
 if __name__ == "__main__":

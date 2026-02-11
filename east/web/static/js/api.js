@@ -129,6 +129,11 @@ export const api = {
     return `/jobs/${jobId}/download`;
   },
 
+  /** Download ZIP package URL (report + test artifacts). */
+  downloadPackageUrl(jobId) {
+    return `/jobs/${jobId}/download-package`;
+  },
+
   /** Delete a job and any generated report artifact. */
   deleteJob(jobId, signal) {
     return request('DELETE', `/api/jobs/${jobId}`, null, signal);
