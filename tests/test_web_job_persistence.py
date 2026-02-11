@@ -93,6 +93,26 @@ class WebJobPersistenceTests(unittest.TestCase):
         disk_jobs = json.loads(web_app.JOBS_DB_PATH.read_text(encoding="utf-8"))["jobs"]
         self.assertFalse(any(job["id"] == "delete-me" for job in disk_jobs))
 
+
+    def test_build_job_artifact_names_include_client_and_date(self):
+        job = web_app.JobState(
+            id="12345678-1234-5678-9abc-def012345678",
+            client="AIGIP Security",
+            domains=["example.com"],
+            tests=["ssl_labs"],
+        )
+
+        report_name, package_name = web_app._build_job_artifact_names(job)
+
+        self.assertTrue(report_name.startswith("EAST_AIGIP_Security_"))
+        self.assertTrue(report_name.endswith("_12345678.docx"))
+        self.assertEqual(package_name, report_name.replace(".docx", "_package.zip"))
+
+    def test_candidate_artifact_paths_ignores_invalid_long_paths(self):
+        too_long = "v=DKIM1; p=" + ("A" * 5000)
+        paths = web_app._candidate_artifact_paths({"record": too_long})
+        self.assertEqual(paths, [])
+
     def test_sync_loads_jobs_created_by_other_workers(self):
         created_at = datetime.utcnow() - timedelta(minutes=2)
         payload = {
