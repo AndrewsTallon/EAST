@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
+from threading import Lock
 
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
@@ -32,6 +33,7 @@ app = FastAPI(title="EAST Web UI")
 DATA_DIR = Path(os.environ.get("EAST_DATA_DIR", "artifacts/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DB_PATH = DATA_DIR / "jobs.json"
+_JOBS_FILE_LOCK = Lock()
 
 def _discover_test_modules():
     """Import all modules inside east.tests so scanner classes are available.
@@ -64,38 +66,74 @@ def _parse_dt(value: Optional[str]) -> Optional[datetime]:
         return None
 
 
-def _save_jobs_to_disk():
-    payload = {"jobs": [_serialize_job(j, include_logs=True) for j in JOBS.values()]}
-    tmp = JOBS_DB_PATH.with_suffix('.json.tmp')
-    tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
-    tmp.replace(JOBS_DB_PATH)
-
-
-def _load_jobs_from_disk():
+def _read_jobs_payload() -> list[dict[str, Any]]:
     if not JOBS_DB_PATH.exists():
-        return
+        return []
     try:
         payload = json.loads(JOBS_DB_PATH.read_text(encoding='utf-8'))
     except Exception:
         logger.warning("Failed to load persisted jobs database", exc_info=True)
-        return
+        return []
+    return payload.get("jobs", [])
 
-    for item in payload.get("jobs", []):
-        job = JobState(
-            id=item["id"],
-            status=item.get("status", "queued"),
-            created_at=_parse_dt(item.get("created_at")) or datetime.utcnow(),
-            completed_at=_parse_dt(item.get("completed_at")),
-            client=item.get("client", ""),
-            output_path=item.get("output_path", ""),
-            domains=item.get("domains", []),
-            tests=item.get("tests", []),
-            logs=item.get("logs", []),
-            results=item.get("results", {}),
-            test_status=item.get("test_status", {}),
-            config_snapshot=item.get("config_snapshot", {}),
-        )
-        JOBS[job.id] = job
+
+def _hydrate_job(item: dict[str, Any]) -> JobState:
+    return JobState(
+        id=item["id"],
+        status=item.get("status", "queued"),
+        created_at=_parse_dt(item.get("created_at")) or datetime.utcnow(),
+        completed_at=_parse_dt(item.get("completed_at")),
+        client=item.get("client", ""),
+        output_path=item.get("output_path", ""),
+        domains=item.get("domains", []),
+        tests=item.get("tests", []),
+        logs=item.get("logs", []),
+        results=item.get("results", {}),
+        test_status=item.get("test_status", {}),
+        config_snapshot=item.get("config_snapshot", {}),
+    )
+
+
+def _sync_jobs_from_disk():
+    """Merge jobs from disk into in-memory state.
+
+    This keeps each worker process aware of jobs created/updated by other workers.
+    """
+    for item in _read_jobs_payload():
+        job_id = item.get("id")
+        if not job_id:
+            continue
+        disk_job = _hydrate_job(item)
+        mem_job = JOBS.get(job_id)
+        if mem_job is None:
+            JOBS[job_id] = disk_job
+            continue
+
+        # If the disk copy is newer, refresh this worker's in-memory snapshot.
+        mem_completed = mem_job.completed_at or datetime.min
+        disk_completed = disk_job.completed_at or datetime.min
+        if disk_completed > mem_completed or len(disk_job.logs) > len(mem_job.logs):
+            JOBS[job_id] = disk_job
+
+
+def _save_jobs_to_disk():
+    with _JOBS_FILE_LOCK:
+        existing = {
+            item.get("id"): item
+            for item in _read_jobs_payload()
+            if item.get("id")
+        }
+        for job in JOBS.values():
+            existing[job.id] = _serialize_job(job, include_logs=True)
+
+        payload = {"jobs": list(existing.values())}
+        tmp = JOBS_DB_PATH.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        tmp.replace(JOBS_DB_PATH)
+
+
+def _load_jobs_from_disk():
+    _sync_jobs_from_disk()
 
 @app.on_event("startup")
 async def _load_scanners():
@@ -341,6 +379,7 @@ async def api_list_jobs(
     order: str = Query("desc"),
 ):
     """List all scan jobs with optional filtering and sorting."""
+    _sync_jobs_from_disk()
     jobs = list(JOBS.values())
 
     if status:
@@ -370,6 +409,7 @@ async def api_list_jobs(
 @app.get("/api/jobs/{job_id}")
 async def api_get_job(job_id: str):
     """Get detailed job status including per-test status."""
+    _sync_jobs_from_disk()
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -379,6 +419,7 @@ async def api_get_job(job_id: str):
 @app.get("/api/jobs/{job_id}/results")
 async def api_get_results_json(job_id: str):
     """Download scan results as JSON."""
+    _sync_jobs_from_disk()
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -438,6 +479,7 @@ async def start_scan(
 
 @app.get("/jobs/{job_id}")
 async def get_job(job_id: str):
+    _sync_jobs_from_disk()
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -446,6 +488,7 @@ async def get_job(job_id: str):
 
 @app.get("/jobs/{job_id}/logs")
 async def stream_logs(job_id: str):
+    _sync_jobs_from_disk()
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -467,6 +510,7 @@ async def stream_logs(job_id: str):
 
 @app.get("/jobs/{job_id}/download")
 async def download_report(job_id: str):
+    _sync_jobs_from_disk()
     job = JOBS.get(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")

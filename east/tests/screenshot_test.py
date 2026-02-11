@@ -1,7 +1,7 @@
 """Screenshot test runner using Playwright."""
 
+import io
 import os
-import subprocess
 from pathlib import Path
 
 from east.tests.base import TestResult, TestRunner
@@ -70,6 +70,9 @@ class ScreenshotTestRunner(TestRunner):
                 f"Failed to capture screenshot: {exc}. Ensure browser binaries are installed for the same user that runs EAST."
             )
 
+        screenshot_bytes = io.BytesIO(output_path.read_bytes())
+        screenshot_bytes.seek(0)
+
         return TestResult(
             test_name=self.name,
             domain=self.domain,
@@ -77,6 +80,7 @@ class ScreenshotTestRunner(TestRunner):
             grade="N/A",
             score=100,
             summary=f"Screenshot captured at {output_path}",
+            visuals={"website_screenshot": screenshot_bytes},
             details={
                 "screenshot_path": str(output_path),
                 "playwright_browsers_path": os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ""),
