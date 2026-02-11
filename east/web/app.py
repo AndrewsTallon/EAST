@@ -31,6 +31,7 @@ from east.utils.validators import sanitize_domain, validate_domain
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="EAST Web UI")
+ASSET_VERSION = os.environ.get("EAST_ASSET_VERSION", datetime.utcnow().strftime("%Y%m%d%H%M%S"))
 
 
 DATA_DIR = Path(os.environ.get("EAST_DATA_DIR", "artifacts/data"))
@@ -154,6 +155,19 @@ def _delete_job_from_disk(job_id: str):
         tmp = JOBS_DB_PATH.with_suffix('.json.tmp')
         tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
         tmp.replace(JOBS_DB_PATH)
+
+
+@app.middleware("http")
+async def _set_cache_headers(request: Request, call_next):
+    """Prevent stale SPA assets from masking deployed UI fixes."""
+    response = await call_next(request)
+    path = request.url.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
 
 @app.on_event("startup")
 async def _load_scanners():
@@ -323,17 +337,27 @@ async def _run_job(job: JobState, config: EASTConfig):
 # ---------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
+async def index() -> HTMLResponse:
     html_path = _STATIC_DIR / "index.html"
     if html_path.exists():
-        return html_path.read_text()
+        html = html_path.read_text(encoding="utf-8")
+        html = html.replace('/static/css/app.css', f'/static/css/app.css?v={ASSET_VERSION}')
+        html = html.replace('/static/js/app.js', f'/static/js/app.js?v={ASSET_VERSION}')
+        return HTMLResponse(
+            content=html,
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            },
+        )
     # Fallback to legacy form if static files not present
     _register_tests()
     options = "\n".join(
         f'<label><input type="checkbox" name="tests" value="{name}" checked> {name}</label><br>'
         for name in TEST_REGISTRY.keys()
     )
-    return f"""
+    return HTMLResponse(content=f"""
     <html><body>
     <h1>EAST Web Scanner</h1>
     <form action='/scan' method='post'>
@@ -345,7 +369,7 @@ async def index() -> str:
       <button type='submit'>Start Scan</button>
     </form>
     </body></html>
-    """
+    """, headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
 
 
 # ---------------------------------------------------------------------------
