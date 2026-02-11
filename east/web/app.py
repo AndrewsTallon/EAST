@@ -277,8 +277,9 @@ async def _run_job(job: JobState, config: EASTConfig):
 
         output_dir = Path("artifacts/web")
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_path = output_dir / f"EAST_web_{job.id}.docx"
-        package_path = output_dir / f"EAST_web_{job.id}_package.zip"
+        report_name, package_name = _build_job_artifact_names(job)
+        output_path = output_dir / report_name
+        package_path = output_dir / package_name
 
         report = EASTReportGenerator(config)
         for domain, domain_results in results.items():
@@ -652,10 +653,28 @@ def _safe_slug(value: str) -> str:
     return slug.strip("_") or "value"
 
 
+def _safe_path_exists(path: Path) -> bool:
+    """Return True when path exists, swallowing invalid-path OS errors."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _build_job_artifact_names(job: JobState) -> tuple[str, str]:
+    """Create human-readable report/package names with client + date + short job id."""
+    client_slug = _safe_slug(job.client or "client")[:40]
+    date_slug = datetime.utcnow().strftime("%Y-%m-%d")
+    unique_suffix = _safe_slug(job.id)[:8] or uuid.uuid4().hex[:8]
+
+    base_name = f"EAST_{client_slug}_{date_slug}_{unique_suffix}"
+    return f"{base_name}.docx", f"{base_name}_package.zip"
+
+
 def _candidate_artifact_paths(item: Any) -> list[Path]:
     if isinstance(item, str):
         p = Path(item)
-        if p.exists() and p.is_file():
+        if _safe_path_exists(p) and p.is_file():
             return [p]
         return []
     if isinstance(item, list):
