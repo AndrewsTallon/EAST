@@ -34,6 +34,7 @@ DATA_DIR = Path(os.environ.get("EAST_DATA_DIR", "artifacts/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 JOBS_DB_PATH = DATA_DIR / "jobs.json"
 _JOBS_FILE_LOCK = Lock()
+DELETED_JOB_IDS: set[str] = set()
 
 def _discover_test_modules():
     """Import all modules inside east.tests so scanner classes are available.
@@ -123,7 +124,12 @@ def _save_jobs_to_disk():
             for item in _read_jobs_payload()
             if item.get("id")
         }
+        for job_id in DELETED_JOB_IDS:
+            existing.pop(job_id, None)
+
         for job in JOBS.values():
+            if job.id in DELETED_JOB_IDS:
+                continue
             existing[job.id] = _serialize_job(job, include_logs=True)
 
         payload = {"jobs": list(existing.values())}
@@ -134,6 +140,14 @@ def _save_jobs_to_disk():
 
 def _load_jobs_from_disk():
     _sync_jobs_from_disk()
+
+
+def _delete_job_from_disk(job_id: str):
+    with _JOBS_FILE_LOCK:
+        payload = {"jobs": [j for j in _read_jobs_payload() if j.get("id") != job_id]}
+        tmp = JOBS_DB_PATH.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+        tmp.replace(JOBS_DB_PATH)
 
 @app.on_event("startup")
 async def _load_scanners():
@@ -183,6 +197,8 @@ JOBS: dict[str, JobState] = {}
 # ---------------------------------------------------------------------------
 
 def _append_log(job: JobState, message: str):
+    if job.id in DELETED_JOB_IDS:
+        return
     line = f"{datetime.utcnow().isoformat()}Z {message}"
     job.logs.append(line)
     logger.info("[job:%s] %s", job.id, message)
@@ -230,6 +246,9 @@ def _serialize_job(job: JobState, include_logs: bool = False) -> dict:
 
 
 async def _run_job(job: JobState, config: EASTConfig):
+    if job.id in DELETED_JOB_IDS:
+        return
+
     def log_and_track(message: str):
         _append_log(job, message)
         _track_test_status(job, message)
@@ -255,6 +274,10 @@ async def _run_job(job: JobState, config: EASTConfig):
             report.add_results(domain, domain_results)
 
         report.generate(str(output_path))
+        if job.id in DELETED_JOB_IDS:
+            output_path.unlink(missing_ok=True)
+            return
+
         job.output_path = str(output_path)
         job.results = {
             domain: [
@@ -414,6 +437,22 @@ async def api_get_job(job_id: str):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return _serialize_job(job, include_logs=True)
+
+
+@app.delete("/api/jobs/{job_id}")
+async def api_delete_job(job_id: str):
+    """Delete a job record and any generated report artifact."""
+    _sync_jobs_from_disk()
+    job = JOBS.pop(job_id, None)
+    DELETED_JOB_IDS.add(job_id)
+
+    if job and job.output_path:
+        Path(job.output_path).unlink(missing_ok=True)
+    _delete_job_from_disk(job_id)
+
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"deleted": True, "job_id": job_id}
 
 
 @app.get("/api/jobs/{job_id}/results")

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import tempfile
 import unittest
@@ -16,11 +17,13 @@ class WebJobPersistenceTests(unittest.TestCase):
         self.original_jobs = dict(web_app.JOBS)
 
         web_app.JOBS.clear()
+        web_app.DELETED_JOB_IDS.clear()
         web_app.JOBS_DB_PATH = Path(self.tmp.name) / "jobs.json"
 
     def tearDown(self):
         web_app.JOBS.clear()
         web_app.JOBS.update(self.original_jobs)
+        web_app.DELETED_JOB_IDS.clear()
         web_app.JOBS_DB_PATH = self.original_db_path
 
     def test_save_preserves_jobs_from_other_workers(self):
@@ -59,6 +62,32 @@ class WebJobPersistenceTests(unittest.TestCase):
         merged = json.loads(web_app.JOBS_DB_PATH.read_text(encoding="utf-8"))
         job_ids = {job["id"] for job in merged["jobs"]}
         self.assertSetEqual(job_ids, {"job-on-disk", "job-in-memory"})
+
+
+    def test_delete_job_removes_record_and_report_file(self):
+        report_path = Path(self.tmp.name) / "report.docx"
+        report_path.write_text("dummy", encoding="utf-8")
+
+        web_app.JOBS["delete-me"] = web_app.JobState(
+            id="delete-me",
+            status="completed",
+            created_at=datetime.utcnow(),
+            completed_at=datetime.utcnow(),
+            domains=["delete.example"],
+            tests=["ssl_labs"],
+            client="Delete Worker",
+            output_path=str(report_path),
+        )
+        web_app._save_jobs_to_disk()
+
+        result = asyncio.run(web_app.api_delete_job("delete-me"))
+
+        self.assertEqual(result, {"deleted": True, "job_id": "delete-me"})
+        self.assertNotIn("delete-me", web_app.JOBS)
+        self.assertFalse(report_path.exists())
+
+        disk_jobs = json.loads(web_app.JOBS_DB_PATH.read_text(encoding="utf-8"))["jobs"]
+        self.assertFalse(any(job["id"] == "delete-me" for job in disk_jobs))
 
     def test_sync_loads_jobs_created_by_other_workers(self):
         created_at = datetime.utcnow() - timedelta(minutes=2)

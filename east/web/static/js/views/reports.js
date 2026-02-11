@@ -89,6 +89,22 @@ export async function renderReports(container, signal) {
     applyFilters();
   });
 
+
+  async function handleDelete(jobId) {
+    const ok = window.confirm('Delete this scan and its generated report file? This cannot be undone.');
+    if (!ok) return;
+
+    try {
+      await api.deleteJob(jobId, signal);
+      allJobs = allJobs.filter(j => j.id !== jobId);
+      toast('Scan deleted', 'success');
+      applyFilters();
+    } catch (err) {
+      if (err.name === 'AbortError') return;
+      toast('Failed to delete scan: ' + err.message, 'error');
+    }
+  }
+
   function applyFilters() {
     // Create new array — never mutate allJobs
     filteredJobs = allJobs.filter(j => {
@@ -189,6 +205,9 @@ export async function renderReports(container, signal) {
             <a href="#/scan/${job.id}" class="btn btn-ghost btn-sm" title="View details">
               <svg viewBox="0 0 20 20" fill="currentColor" style="width:14px;height:14px"><path d="M10 12a2 2 0 100-4 2 2 0 000 4z"/><path fill-rule="evenodd" d="M.458 10C1.732 5.943 5.522 3 10 3s8.268 2.943 9.542 7c-1.274 4.057-5.064 7-9.542 7S1.732 14.057.458 10zM14 10a4 4 0 11-8 0 4 4 0 018 0z" clip-rule="evenodd"/></svg>
             </a>
+            <button class="btn btn-danger btn-sm" title="Delete scan" data-delete-job="${job.id}">
+              <svg viewBox="0 0 20 20" fill="currentColor" style="width:14px;height:14px"><path fill-rule="evenodd" d="M6 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd"/><path fill-rule="evenodd" d="M4 5a1 1 0 011-1h3V3a1 1 0 112 0v1h3a1 1 0 110 2h-.2l-.867 10.142A2 2 0 0110.94 18H9.06a2 2 0 01-1.993-1.858L6.2 6H6a1 1 0 01-1-1z" clip-rule="evenodd"/></svg>
+            </button>
           </div>
         </td>
       </tr>`;
@@ -209,6 +228,14 @@ export async function renderReports(container, signal) {
           sortOrder = 'desc';
         }
         applyFilters();
+      });
+    });
+
+    document.querySelectorAll('[data-delete-job]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault();
+        const { deleteJob } = btn.dataset;
+        if (deleteJob) handleDelete(deleteJob);
       });
     });
   }
