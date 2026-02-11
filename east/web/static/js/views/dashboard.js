@@ -1,11 +1,19 @@
 /**
  * Dashboard View
  * Overview of recent scans, stats, and quick actions.
+ *
+ * Lifecycle: accepts AbortSignal from router, returns cleanup function.
+ * All DOM writes are guarded by signal.aborted to prevent stale updates.
  */
 import { api } from '../api.js';
 import { el, formatDate, formatDuration, statusBadge, escapeHtml, scannerDisplay } from '../utils.js';
 
-export async function renderDashboard(container) {
+const DEBUG = typeof window !== 'undefined' && window.EAST_DEBUG;
+function log(...args) { if (DEBUG) console.log('[EAST:dashboard]', ...args); }
+
+export async function renderDashboard(container, signal) {
+  // signal is the AbortSignal from the router
+
   container.innerHTML = `
     <div class="page-header">
       <div class="page-header-row">
@@ -32,16 +40,31 @@ export async function renderDashboard(container) {
   `;
 
   try {
-    const data = await api.listJobs({ order: 'desc' });
+    const data = await api.listJobs({ order: 'desc' }, signal);
+
+    // Guard: if aborted while awaiting, do not touch DOM
+    if (signal && signal.aborted) return;
+
     renderStats(data.jobs);
     renderRecentScans(data.jobs.slice(0, 8));
+
+    log('rendered', data.jobs.length, 'jobs');
   } catch (err) {
-    document.getElementById('recentScans').innerHTML = `
-      <div class="empty-state">
-        <div class="empty-state-title">Unable to load data</div>
-        <div class="empty-state-desc">${escapeHtml(err.message)}</div>
-      </div>`;
+    // AbortError means navigation changed — do not render error
+    if (err.name === 'AbortError') return;
+
+    const el = document.getElementById('recentScans');
+    if (el) {
+      el.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-title">Unable to load data</div>
+          <div class="empty-state-desc">${escapeHtml(err.message)}</div>
+        </div>`;
+    }
   }
+
+  // Return cleanup (no intervals to clear, but satisfies the router contract)
+  return () => { log('cleanup'); };
 }
 
 function renderStats(jobs) {
@@ -51,7 +74,10 @@ function renderStats(jobs) {
   const running = jobs.filter(j => j.status === 'running' || j.status === 'queued').length;
   const domains = new Set(jobs.flatMap(j => j.domains)).size;
 
-  document.getElementById('statsGrid').innerHTML = `
+  const statsGrid = document.getElementById('statsGrid');
+  if (!statsGrid) return;
+
+  statsGrid.innerHTML = `
     <div class="stat-card">
       <div class="stat-label">Total Scans</div>
       <div class="stat-value">${total}</div>
@@ -77,6 +103,8 @@ function renderStats(jobs) {
 
 function renderRecentScans(jobs) {
   const container = document.getElementById('recentScans');
+  if (!container) return;
+
   if (!jobs.length) {
     container.innerHTML = `
       <div class="empty-state">
@@ -87,6 +115,8 @@ function renderRecentScans(jobs) {
       </div>`;
     return;
   }
+
+  const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
   let html = `<div class="table-container"><table class="data-table">
     <thead><tr>
@@ -116,5 +146,6 @@ function renderRecentScans(jobs) {
   }
 
   html += '</tbody></table></div>';
+  html += `<div class="text-muted text-sm" style="text-align:right;margin-top:8px">Last updated: ${now}</div>`;
   container.innerHTML = html;
 }

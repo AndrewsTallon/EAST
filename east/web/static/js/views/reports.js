@@ -1,13 +1,15 @@
 /**
  * Reports Library View
  * Full list of historical scans with search, filter, and sort.
+ *
+ * Lifecycle: accepts AbortSignal from router, returns cleanup function.
  */
 import { api } from '../api.js';
 import {
   formatDate, formatDuration, statusBadge, escapeHtml, debounce, toast,
 } from '../utils.js';
 
-export async function renderReports(container) {
+export async function renderReports(container, signal) {
   let allJobs = [];
   let filteredJobs = [];
   let sortBy = 'created_at';
@@ -53,15 +55,20 @@ export async function renderReports(container) {
 
   // Load data
   try {
-    const data = await api.listJobs({});
+    const data = await api.listJobs({}, signal);
+    if (signal && signal.aborted) return;
     allJobs = data.jobs;
     applyFilters();
   } catch (err) {
-    document.getElementById('reportsTable').innerHTML = `
-      <div class="empty-state">
-        <div class="empty-state-title">Failed to load reports</div>
-        <div class="empty-state-desc">${escapeHtml(err.message)}</div>
-      </div>`;
+    if (err.name === 'AbortError') return;
+    const el = document.getElementById('reportsTable');
+    if (el) {
+      el.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-state-title">Failed to load reports</div>
+          <div class="empty-state-desc">${escapeHtml(err.message)}</div>
+        </div>`;
+    }
     return;
   }
 
@@ -83,6 +90,7 @@ export async function renderReports(container) {
   });
 
   function applyFilters() {
+    // Create new array — never mutate allJobs
     filteredJobs = allJobs.filter(j => {
       if (filterStatus && j.status !== filterStatus) return false;
       if (searchQuery) {
@@ -92,7 +100,7 @@ export async function renderReports(container) {
       return true;
     });
 
-    // Sort
+    // Sort the copy
     filteredJobs.sort((a, b) => {
       let va = a[sortBy] || '';
       let vb = b[sortBy] || '';
@@ -111,14 +119,18 @@ export async function renderReports(container) {
   function renderTable() {
     const pagination = document.getElementById('reportsPagination');
     const countEl = document.getElementById('resultCount');
+    if (!pagination || !countEl) return;
 
     if (!filteredJobs.length) {
-      document.getElementById('reportsTable').innerHTML = `
-        <div class="empty-state">
-          <svg class="empty-state-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/></svg>
-          <div class="empty-state-title">${searchQuery || filterStatus ? 'No matching scans' : 'No scans yet'}</div>
-          <div class="empty-state-desc">${searchQuery || filterStatus ? 'Try adjusting your filters' : 'Start your first scan to see reports here'}</div>
-        </div>`;
+      const tableEl = document.getElementById('reportsTable');
+      if (tableEl) {
+        tableEl.innerHTML = `
+          <div class="empty-state">
+            <svg class="empty-state-icon" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/></svg>
+            <div class="empty-state-title">${searchQuery || filterStatus ? 'No matching scans' : 'No scans yet'}</div>
+            <div class="empty-state-desc">${searchQuery || filterStatus ? 'Try adjusting your filters' : 'Start your first scan to see reports here'}</div>
+          </div>`;
+      }
       pagination.style.display = 'none';
       return;
     }
@@ -183,7 +195,8 @@ export async function renderReports(container) {
     }
 
     html += '</tbody></table></div>';
-    document.getElementById('reportsTable').innerHTML = html;
+    const tableEl = document.getElementById('reportsTable');
+    if (tableEl) tableEl.innerHTML = html;
 
     // Sortable headers
     document.querySelectorAll('th.sortable').forEach(th => {
@@ -199,4 +212,7 @@ export async function renderReports(container) {
       });
     });
   }
+
+  // Return cleanup for router
+  return () => {};
 }

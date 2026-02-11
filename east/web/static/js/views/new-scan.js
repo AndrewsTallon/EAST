@@ -1,6 +1,8 @@
 /**
  * New Scan View
  * Full-featured scan creation with scanner discovery, domain tags, config.
+ *
+ * Lifecycle: accepts AbortSignal from router, returns cleanup function.
  */
 import { api } from '../api.js';
 import { el, toast, escapeHtml, scannerDisplay, scannerIcon, groupScannersByCategory } from '../utils.js';
@@ -8,14 +10,17 @@ import { navigate } from '../router.js';
 
 let scannersCache = null;
 
-export async function renderNewScan(container) {
+export async function renderNewScan(container, signal) {
   // Check if cloning from a previous scan
   const urlParams = new URLSearchParams(window.location.hash.split('?')[1] || '');
   const cloneId = urlParams.get('clone');
   let cloneData = null;
   if (cloneId) {
-    try { cloneData = await api.getJob(cloneId); } catch (e) { /* ignore */ }
+    try { cloneData = await api.getJob(cloneId, signal); } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
   }
+  if (signal && signal.aborted) return;
 
   container.innerHTML = `
     <div class="page-header">
@@ -96,7 +101,8 @@ export async function renderNewScan(container) {
   let selectedScanners = new Set();
   try {
     if (!scannersCache) {
-      const data = await api.getScanners();
+      const data = await api.getScanners(signal);
+      if (signal && signal.aborted) return;
       scannersCache = data.scanners;
     }
     scanners = scannersCache;
@@ -108,6 +114,7 @@ export async function renderNewScan(container) {
     }
     renderScannerList();
   } catch (err) {
+    if (err.name === 'AbortError') return;
     document.getElementById('scannerList').innerHTML = `
       <div class="error-card">
         <div class="error-card-title">Failed to load scanners</div>
@@ -265,10 +272,11 @@ export async function renderNewScan(container) {
         ssllabs_email: email,
         ssllabs_usecache: useCache,
       };
-      const result = await api.startScan(payload);
+      const result = await api.startScan(payload, signal);
       toast('Scan started successfully', 'success');
       navigate(`/scan/${result.job_id}`);
     } catch (err) {
+      if (err.name === 'AbortError') return;
       toast(`Failed to start scan: ${err.message}`, 'error');
       btn.disabled = false;
       btn.innerHTML = `
@@ -276,4 +284,7 @@ export async function renderNewScan(container) {
         Start Scan`;
     }
   });
+
+  // Return cleanup for router (DOM listeners cleaned up when container cleared)
+  return () => {};
 }
