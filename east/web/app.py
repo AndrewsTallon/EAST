@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import os
+import pkgutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,6 +27,29 @@ from east.utils.validators import sanitize_domain, validate_domain
 
 logger = logging.getLogger(__name__)
 app = FastAPI(title="EAST Web UI")
+
+
+def _discover_test_modules():
+    """Import all modules inside east.tests so scanner classes are available.
+
+    Uses pkgutil to walk the package — no module names are hardcoded.
+    Each module is imported exactly once (Python caches in sys.modules).
+    """
+    import east.tests as _pkg
+
+    for finder, module_name, ispkg in pkgutil.iter_modules(_pkg.__path__):
+        full_name = f"east.tests.{module_name}"
+        try:
+            importlib.import_module(full_name)
+        except Exception:
+            logger.warning("Failed to import scanner module %s", full_name, exc_info=True)
+
+
+@app.on_event("startup")
+async def _load_scanners():
+    """Discover and register all scanner modules once at application startup."""
+    _discover_test_modules()
+    _register_tests()
 
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.exists():
