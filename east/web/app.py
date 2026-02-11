@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
 import logging
 import os
 import pkgutil
+import re
+import zipfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -86,6 +89,7 @@ def _hydrate_job(item: dict[str, Any]) -> JobState:
         completed_at=_parse_dt(item.get("completed_at")),
         client=item.get("client", ""),
         output_path=item.get("output_path", ""),
+        package_path=item.get("package_path", ""),
         domains=item.get("domains", []),
         tests=item.get("tests", []),
         logs=item.get("logs", []),
@@ -173,6 +177,7 @@ class JobState:
     completed_at: Optional[datetime] = None
     client: str = ""
     output_path: str = ""
+    package_path: str = ""
     domains: list[str] = field(default_factory=list)
     tests: list[str] = field(default_factory=list)
     logs: list[str] = field(default_factory=list)
@@ -238,6 +243,7 @@ def _serialize_job(job: JobState, include_logs: bool = False) -> dict:
         "domains": job.domains,
         "tests": job.tests,
         "output_path": job.output_path,
+        "package_path": job.package_path,
         "results": job.results,
         "test_status": job.test_status,
         "config_snapshot": job.config_snapshot,
@@ -270,17 +276,21 @@ async def _run_job(job: JobState, config: EASTConfig):
         output_dir = Path("artifacts/web")
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = output_dir / f"EAST_web_{job.id}.docx"
+        package_path = output_dir / f"EAST_web_{job.id}_package.zip"
 
         report = EASTReportGenerator(config)
         for domain, domain_results in results.items():
             report.add_results(domain, domain_results)
 
         report.generate(str(output_path))
+        _build_scan_package(package_path=package_path, report_path=output_path, results=results, job=job)
         if job.id in DELETED_JOB_IDS:
             output_path.unlink(missing_ok=True)
+            package_path.unlink(missing_ok=True)
             return
 
         job.output_path = str(output_path)
+        job.package_path = str(package_path)
         job.results = {
             domain: [
                 {
@@ -457,6 +467,8 @@ async def api_delete_job(job_id: str):
 
     if job and job.output_path:
         Path(job.output_path).unlink(missing_ok=True)
+    if job and job.package_path:
+        Path(job.package_path).unlink(missing_ok=True)
     _delete_job_from_disk(job_id)
 
     if not job:
@@ -570,3 +582,111 @@ async def download_report(job_id: str):
         filename=Path(job.output_path).name,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     )
+
+
+@app.get("/jobs/{job_id}/download-package")
+async def download_package(job_id: str):
+    _sync_jobs_from_disk()
+    job = JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if job.status != "completed" or not job.package_path:
+        raise HTTPException(status_code=400, detail="Package is not ready yet")
+
+    return FileResponse(
+        path=job.package_path,
+        filename=Path(job.package_path).name,
+        media_type="application/zip",
+    )
+
+
+def _safe_slug(value: str) -> str:
+    slug = re.sub(r"[^a-zA-Z0-9._-]+", "_", value.strip())
+    return slug.strip("_") or "value"
+
+
+def _candidate_artifact_paths(item: Any) -> list[Path]:
+    if isinstance(item, str):
+        p = Path(item)
+        if p.exists() and p.is_file():
+            return [p]
+        return []
+    if isinstance(item, list):
+        paths: list[Path] = []
+        for value in item:
+            paths.extend(_candidate_artifact_paths(value))
+        return paths
+    if isinstance(item, dict):
+        paths: list[Path] = []
+        for value in item.values():
+            paths.extend(_candidate_artifact_paths(value))
+        return paths
+    return []
+
+
+def _build_scan_package(
+    package_path: Path,
+    report_path: Path,
+    results: dict[str, list[Any]],
+    job: JobState,
+):
+    package_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with zipfile.ZipFile(package_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        if report_path.exists():
+            zf.write(report_path, arcname=f"report/{report_path.name}")
+
+        manifest = {
+            "job_id": job.id,
+            "client": job.client,
+            "domains": job.domains,
+            "tests": job.tests,
+            "created_at": job.created_at.isoformat() + "Z",
+            "completed_at": datetime.utcnow().isoformat() + "Z",
+        }
+        zf.writestr("manifest.json", json.dumps(manifest, indent=2))
+
+        results_payload: dict[str, list[dict[str, Any]]] = {}
+        for domain, domain_results in results.items():
+            results_payload[domain] = []
+            domain_slug = _safe_slug(domain)
+
+            for result in domain_results:
+                result_slug = _safe_slug(result.test_name)
+                base_dir = f"tests/{domain_slug}/{result_slug}"
+
+                result_data = {
+                    "test_name": result.test_name,
+                    "domain": result.domain,
+                    "timestamp": result.timestamp.isoformat(),
+                    "success": result.success,
+                    "grade": result.grade,
+                    "score": result.score,
+                    "max_score": result.max_score,
+                    "summary": result.summary,
+                    "error": result.error,
+                    "details": result.details,
+                    "recommendations": result.recommendations,
+                    "tables": result.tables,
+                    "visuals": sorted(result.visuals.keys()),
+                }
+                results_payload[domain].append(result_data)
+                zf.writestr(f"{base_dir}/result.json", json.dumps(result_data, indent=2))
+
+                for visual_name, visual_bytes in result.visuals.items():
+                    if isinstance(visual_bytes, io.BytesIO):
+                        zf.writestr(
+                            f"{base_dir}/visuals/{_safe_slug(visual_name)}.png",
+                            visual_bytes.getvalue(),
+                        )
+
+                copied: set[str] = set()
+                for artifact_path in _candidate_artifact_paths(result.details):
+                    resolved = artifact_path.resolve()
+                    key = str(resolved)
+                    if key in copied:
+                        continue
+                    copied.add(key)
+                    zf.write(resolved, arcname=f"{base_dir}/files/{resolved.name}")
+
+        zf.writestr("results.json", json.dumps(results_payload, indent=2))
