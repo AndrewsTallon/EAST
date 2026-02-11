@@ -9,3 +9,6 @@ build/
 
 # Generated report files
 EAST_*.docx
+
+# Local API response cache
+.cache/
