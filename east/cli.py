@@ -47,7 +47,7 @@ def _register_tests():
     from east.tests.open_ports_test import OpenPortsTestRunner
     from east.tests.screenshot_test import ScreenshotTestRunner
 
-    TEST_REGISTRY = {
+    TEST_REGISTRY.update({
         "ssl_labs": SSLLabsTestRunner,
         "mozilla_observatory": MozillaObservatoryTestRunner,
         "dns_lookup": DNSTestRunner,
@@ -62,7 +62,7 @@ def _register_tests():
         "cookies": CookiesTestRunner,
         "open_ports": OpenPortsTestRunner,
         "screenshots": ScreenshotTestRunner,
-    }
+    })
 
 
 def _setup_logging(verbose: bool):
