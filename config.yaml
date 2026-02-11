@@ -56,3 +56,8 @@ branding:
   logo: "assets/logo.png"
   company_name: "Your Security Company"
   color_scheme: "professional"
+
+# Runtime environment notes (set as shell/systemd env vars):
+# EAST_CHROME_PATH=/usr/bin/chromium
+# PLAYWRIGHT_BROWSERS_PATH=/opt/east/pw-browsers
+# EAST_DATA_DIR=/opt/east/data

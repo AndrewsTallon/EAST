@@ -364,6 +364,56 @@ def list_tests():
 
 
 @cli.command()
+def doctor():
+    """Run runtime prerequisite checks for Lighthouse, Playwright, and TLS fallback."""
+    from east.tests.performance_test import PerformanceTestRunner
+    from east.tests.screenshot_test import ScreenshotTestRunner
+
+    console.print("[bold cyan]EAST Doctor[/bold cyan]")
+
+    lh = PerformanceTestRunner.diagnose_lighthouse_prereqs()
+    console.print("\n[bold]Lighthouse / Chrome[/bold]")
+    console.print(f"node: {lh.get('node') or 'MISSING'}")
+    console.print(f"npm: {lh.get('npm') or 'MISSING'}")
+    console.print(f"lighthouse: {lh.get('lighthouse') or 'MISSING'}")
+    console.print(f"npx: {lh.get('npx') or 'MISSING'}")
+    console.print(f"chrome: {lh.get('chrome') or 'MISSING'}")
+    if lh.get('chrome_version'):
+        console.print(f"chrome_version: {lh['chrome_version']}")
+
+    pw = ScreenshotTestRunner.diagnose_playwright_prereqs()
+    console.print("\n[bold]Playwright[/bold]")
+    console.print(f"python-playwright: {'OK' if pw.get('playwright_python') else 'MISSING'}")
+    console.print(f"playwright-cli: {pw.get('playwright_cli') or 'MISSING'}")
+    console.print(f"PLAYWRIGHT_BROWSERS_PATH: {pw.get('playwright_browsers_path') or '(default user cache)'}")
+    console.print(f"chromium-launch: {'OK' if pw.get('browser_launch') else 'FAILED'}")
+
+    console.print("\n[bold]Local TLS tools[/bold]")
+    import shutil
+    console.print(f"openssl: {shutil.which('openssl') or 'MISSING'}")
+    console.print(f"testssl.sh: {shutil.which('testssl.sh') or shutil.which('testssl') or 'MISSING'}")
+    try:
+        import sslyze  # noqa: F401
+        console.print("sslyze: import OK")
+    except Exception:
+        console.print("sslyze: import FAILED")
+
+    errors = list(lh.get('errors') or []) + list(pw.get('errors') or [])
+    if errors:
+        console.print("\n[red bold]Doctor found issues:[/red bold]")
+        for err in errors:
+            console.print(f" - {err}")
+        console.print("\n[bold]Fix commands:[/bold]")
+        console.print("sudo apt-get update && sudo apt-get install -y nodejs npm chromium-browser openssl")
+        console.print("python -m playwright install --with-deps chromium")
+        console.print("pip install sslyze")
+        console.print("# Optional: install testssl.sh and put testssl.sh on PATH")
+        raise SystemExit(1)
+
+    console.print("\n[green]Doctor checks passed.[/green]")
+
+
+@cli.command()
 def version():
     """Show version information."""
     console.print(f"EAST v{__version__}")

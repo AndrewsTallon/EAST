@@ -210,8 +210,8 @@ class SSLLabsTestRunner(TestRunner):
 
             if data is None:
                 return (
-                    "SSL Labs API is not responding. "
-                    "The service may be overloaded — try again later.",
+                    "SSL Labs API is not responding or overloaded. "
+                    "Local TLS fallback should be enabled to continue with deterministic results.",
                     "api_not_responding",
                 )
 
@@ -236,7 +236,11 @@ class SSLLabsTestRunner(TestRunner):
 
         except Exception as e:
             logger.exception("SSL Labs test failed for %s", self.domain)
-            return (str(e), "exception")
+            msg = str(e)
+            lowered = msg.lower()
+            if "overloaded" in lowered or "not responding" in lowered or "timeout" in lowered:
+                return (msg, "api_not_responding")
+            return (msg, "exception")
 
     # ------------------------------------------------------------------
     # Local TLS fallback
@@ -258,7 +262,13 @@ class SSLLabsTestRunner(TestRunner):
             "name": "local",
             "tool": probe_data.get("tool", "unknown"),
             "fallback_reason": reason,
+            "attempts": (probe_data.get("_engine") or {}).get("attempts", []),
         }
+
+        self.logger.info(
+            "SSL fallback engine=local tool=%s reason=%s attempts=%s",
+            engine_meta["tool"], reason, engine_meta["attempts"],
+        )
 
         return self._build_test_result(
             grade=probe_data["grade"],
@@ -478,7 +488,8 @@ class SSLLabsTestRunner(TestRunner):
         protocol_details = self._extract_protocol_details(ep)
         vulnerability_details = self._extract_vulnerabilities(ep)
 
-        engine_meta = {"name": "ssllabs"}
+        engine_meta = {"name": "ssllabs", "fallback_reason": None, "tool": "ssllabs"}
+        self.logger.info("SSL engine=ssllabs tool=ssllabs reason=primary")
 
         return self._build_test_result(
             grade=grade,

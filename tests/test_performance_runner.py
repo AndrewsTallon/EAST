@@ -17,7 +17,8 @@ class PerformanceRunnerCommandResolutionTests(unittest.TestCase):
                 "lighthouse.bat": None,
                 "lighthouse.exe": None,
             }.get(name)
-            cmd, diag = runner._build_lighthouse_command("out.json")
+            with patch.object(runner, "_resolve_chrome_binary", return_value=("/usr/bin/chromium", "mock")):
+                cmd, diag = runner._build_lighthouse_command("out.json")
 
         self.assertTrue(cmd[0].lower().endswith("lighthouse.cmd"))
         self.assertIn("--output=json", cmd)
@@ -37,7 +38,8 @@ class PerformanceRunnerCommandResolutionTests(unittest.TestCase):
                 "npx.exe": None,
                 "npx.bat": None,
             }.get(name)
-            cmd, _ = runner._build_lighthouse_command("out.json")
+            with patch.object(runner, "_resolve_chrome_binary", return_value=("/usr/bin/chromium", "mock")):
+                cmd, _ = runner._build_lighthouse_command("out.json")
 
         self.assertTrue(cmd[0].lower().endswith("npx.cmd"))
         self.assertEqual(cmd[1:3], ["--yes", "lighthouse"])
@@ -48,8 +50,9 @@ class PerformanceRunnerCommandResolutionTests(unittest.TestCase):
         with patch("east.tests.performance_test.os.name", "nt"), patch(
             "east.tests.performance_test.shutil.which", return_value=None
         ):
-            with self.assertRaises(RuntimeError) as err:
-                runner._build_lighthouse_command("out.json")
+            with patch.object(runner, "_resolve_chrome_binary", return_value=("/usr/bin/chromium", "mock")):
+                with self.assertRaises(RuntimeError) as err:
+                    runner._build_lighthouse_command("out.json")
 
         self.assertIn("Node.js/npm", str(err.exception))
 
@@ -71,8 +74,9 @@ class PerformanceRunnerCommandResolutionTests(unittest.TestCase):
                 "npm": r"C:\Program Files\nodejs\npm.cmd",
                 "npm.cmd": r"C:\Program Files\nodejs\npm.cmd",
             }.get(name)
-            with self.assertRaises(RuntimeError) as err:
-                runner._build_lighthouse_command("out.json")
+            with patch.object(runner, "_resolve_chrome_binary", return_value=("/usr/bin/chromium", "mock")):
+                with self.assertRaises(RuntimeError) as err:
+                    runner._build_lighthouse_command("out.json")
 
         self.assertIn(".ps1 shim", str(err.exception))
 

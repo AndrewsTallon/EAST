@@ -127,7 +127,7 @@ def compute_grade(
 # sslyze adapter
 # ─────────────────────────────────────────────────────────────────────────
 
-def _probe_sslyze(domain: str, timeout: int = 30) -> Optional[dict]:
+def _probe_sslyze(domain: str, timeout: int = 30, attempts: Optional[list[str]] = None) -> Optional[dict]:
     """Run sslyze and return normalised result dict, or None on failure."""
     try:
         from sslyze import (
@@ -138,6 +138,8 @@ def _probe_sslyze(domain: str, timeout: int = 30) -> Optional[dict]:
         )
     except ImportError:
         logger.debug("sslyze not importable — skipping")
+        if attempts is not None:
+            attempts.append("sslyze: import_error")
         return None
 
     try:
@@ -172,6 +174,8 @@ def _probe_sslyze(domain: str, timeout: int = 30) -> Optional[dict]:
         # Check connectivity
         if result.connectivity_error_trace:
             logger.warning("sslyze connectivity error for %s", domain)
+            if attempts is not None:
+                attempts.append("sslyze: connectivity_error")
             return None
 
         scan = result.scan_result
@@ -253,6 +257,8 @@ def _probe_sslyze(domain: str, timeout: int = 30) -> Optional[dict]:
         }
     except Exception as exc:
         logger.warning("sslyze probe failed for %s: %s", domain, exc)
+        if attempts is not None:
+            attempts.append(f"sslyze: exception:{exc}")
         return None
 
 
@@ -260,11 +266,13 @@ def _probe_sslyze(domain: str, timeout: int = 30) -> Optional[dict]:
 # testssl.sh adapter
 # ─────────────────────────────────────────────────────────────────────────
 
-def _probe_testssl(domain: str, timeout: int = 120) -> Optional[dict]:
+def _probe_testssl(domain: str, timeout: int = 120, attempts: Optional[list[str]] = None) -> Optional[dict]:
     """Run testssl.sh and return normalised result dict, or None."""
     testssl_bin = shutil.which("testssl.sh") or shutil.which("testssl")
     if not testssl_bin:
         logger.debug("testssl.sh not found on PATH — skipping")
+        if attempts is not None:
+            attempts.append("testssl: not_on_path")
         return None
 
     try:
@@ -288,6 +296,8 @@ def _probe_testssl(domain: str, timeout: int = 120) -> Optional[dict]:
 
         if proc.returncode not in (0, 1):
             logger.warning("testssl.sh exited %d for %s", proc.returncode, domain)
+            if attempts is not None:
+                attempts.append(f"testssl: nonzero_exit:{proc.returncode}")
             return None
 
         with open(tmp_path) as f:
@@ -375,9 +385,13 @@ def _probe_testssl(domain: str, timeout: int = 120) -> Optional[dict]:
         }
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
         logger.warning("testssl.sh probe failed for %s: %s", domain, exc)
+        if attempts is not None:
+            attempts.append(f"testssl: exception:{exc}")
         return None
     except Exception as exc:
         logger.warning("testssl.sh probe failed for %s: %s", domain, exc)
+        if attempts is not None:
+            attempts.append(f"testssl: exception:{exc}")
         return None
 
 
@@ -385,39 +399,47 @@ def _probe_testssl(domain: str, timeout: int = 120) -> Optional[dict]:
 # OpenSSL s_client adapter
 # ─────────────────────────────────────────────────────────────────────────
 
-def _openssl_check_protocol(domain: str, flag: str, timeout: int = 10) -> bool:
+def _openssl_check_protocol(openssl_bin: str, domain: str, flag: str, timeout: int = 10) -> bool:
     """Return True if the server accepts a connection with the given protocol flag."""
     try:
         proc = subprocess.run(
             [
-                "openssl", "s_client",
+                openssl_bin, "s_client",
                 "-connect", f"{domain}:443",
                 flag,
                 "-servername", domain,
+                "-brief",
             ],
             input=b"",
             capture_output=True,
+            text=True,
             timeout=timeout,
         )
-        output = proc.stdout.decode("utf-8", errors="replace")
-        # A successful handshake contains "Protocol  :" and no error alerts
-        return "BEGIN CERTIFICATE" in output and "alert" not in output.lower().split("protocol")[0]
+        output = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        lowered = output.lower()
+        if proc.returncode != 0:
+            return False
+        if "verification error" in lowered and "verify return code: 0" not in lowered:
+            return False
+        return "protocol" in lowered and ("cipher" in lowered or "verify return code: 0" in lowered)
     except Exception:
         return False
 
 
-def _probe_openssl(domain: str, timeout: int = 30) -> Optional[dict]:
+def _probe_openssl(domain: str, timeout: int = 30, attempts: Optional[list[str]] = None) -> Optional[dict]:
     """Probe TLS with the openssl CLI tool and return normalised result dict."""
     openssl_bin = shutil.which("openssl")
     if not openssl_bin:
         logger.debug("openssl not found on PATH — skipping")
+        if attempts is not None:
+            attempts.append("openssl: not_on_path")
         return None
 
     try:
         # Get certificate and connection info
         proc = subprocess.run(
             [
-                "openssl", "s_client",
+                openssl_bin, "s_client",
                 "-connect", f"{domain}:443",
                 "-servername", domain,
                 "-showcerts",
@@ -428,8 +450,10 @@ def _probe_openssl(domain: str, timeout: int = 30) -> Optional[dict]:
         )
         conn_output = proc.stdout.decode("utf-8", errors="replace")
 
-        if "BEGIN CERTIFICATE" not in conn_output:
+        if proc.returncode != 0 or "BEGIN CERTIFICATE" not in conn_output:
             logger.warning("openssl could not connect to %s:443", domain)
+            if attempts is not None:
+                attempts.append(f"openssl: connect_failed:exit={proc.returncode}")
             return None
 
         # Extract the leaf certificate PEM
@@ -442,7 +466,7 @@ def _probe_openssl(domain: str, timeout: int = 30) -> Optional[dict]:
         # Parse certificate with openssl x509
         x509_proc = subprocess.run(
             [
-                "openssl", "x509",
+                openssl_bin, "x509",
                 "-noout",
                 "-subject", "-issuer", "-dates", "-pubkey",
                 "-text",
@@ -514,7 +538,7 @@ def _probe_openssl(domain: str, timeout: int = 30) -> Optional[dict]:
             "TLS 1.3": "-tls1_3",
         }
         for label, flag in proto_flags.items():
-            protocols[label] = _openssl_check_protocol(domain, flag, timeout=10)
+            protocols[label] = _openssl_check_protocol(openssl_bin, domain, flag, timeout=10)
 
         # OpenSSL cannot reliably test for specific vulns; mark as unknown (False)
         vulns = dict(_DEFAULT_VULNS)
@@ -532,6 +556,8 @@ def _probe_openssl(domain: str, timeout: int = 30) -> Optional[dict]:
         }
     except Exception as exc:
         logger.warning("openssl probe failed for %s: %s", domain, exc)
+        if attempts is not None:
+            attempts.append(f"openssl: exception:{exc}")
         return None
 
 
@@ -560,6 +586,7 @@ def run_local_tls_probe(
     every tool failed.
     """
     preference = tool_preference or DEFAULT_TOOL_PREFERENCE
+    attempts: list[str] = []
 
     for tool_name in preference:
         adapter = _ADAPTERS.get(tool_name)
@@ -567,14 +594,17 @@ def run_local_tls_probe(
             logger.warning("Unknown local TLS tool: %s — skipping", tool_name)
             continue
         logger.info("Attempting local TLS probe with %s for %s", tool_name, domain)
-        result = adapter(domain, timeout=timeout)
+        result = adapter(domain, timeout=timeout, attempts=attempts)
         if result is not None:
             logger.info(
                 "Local TLS probe succeeded with %s for %s (grade=%s)",
                 tool_name, domain, result.get("grade", "?"),
             )
+            engine_meta = result.setdefault("_engine", {})
+            engine_meta["attempts"] = attempts.copy()
             return result
         logger.info("Local TLS probe with %s failed for %s — trying next", tool_name, domain)
 
     logger.error("All local TLS probes failed for %s", domain)
+    logger.error("Local TLS attempts for %s: %s", domain, attempts)
     return None

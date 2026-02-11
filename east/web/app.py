@@ -10,7 +10,7 @@ import os
 import pkgutil
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,6 +29,10 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="EAST Web UI")
 
 
+DATA_DIR = Path(os.environ.get("EAST_DATA_DIR", "artifacts/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_DB_PATH = DATA_DIR / "jobs.json"
+
 def _discover_test_modules():
     """Import all modules inside east.tests so scanner classes are available.
 
@@ -45,11 +49,60 @@ def _discover_test_modules():
             logger.warning("Failed to import scanner module %s", full_name, exc_info=True)
 
 
+
+
+def _parse_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    val = value.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(val)
+        if dt.tzinfo is None:
+            return dt
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _save_jobs_to_disk():
+    payload = {"jobs": [_serialize_job(j, include_logs=True) for j in JOBS.values()]}
+    tmp = JOBS_DB_PATH.with_suffix('.json.tmp')
+    tmp.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+    tmp.replace(JOBS_DB_PATH)
+
+
+def _load_jobs_from_disk():
+    if not JOBS_DB_PATH.exists():
+        return
+    try:
+        payload = json.loads(JOBS_DB_PATH.read_text(encoding='utf-8'))
+    except Exception:
+        logger.warning("Failed to load persisted jobs database", exc_info=True)
+        return
+
+    for item in payload.get("jobs", []):
+        job = JobState(
+            id=item["id"],
+            status=item.get("status", "queued"),
+            created_at=_parse_dt(item.get("created_at")) or datetime.utcnow(),
+            completed_at=_parse_dt(item.get("completed_at")),
+            client=item.get("client", ""),
+            output_path=item.get("output_path", ""),
+            domains=item.get("domains", []),
+            tests=item.get("tests", []),
+            logs=item.get("logs", []),
+            results=item.get("results", {}),
+            test_status=item.get("test_status", {}),
+            config_snapshot=item.get("config_snapshot", {}),
+        )
+        JOBS[job.id] = job
+
 @app.on_event("startup")
 async def _load_scanners():
     """Discover and register all scanner modules once at application startup."""
     _discover_test_modules()
     _register_tests()
+    _load_jobs_from_disk()
 
 _STATIC_DIR = Path(__file__).parent / "static"
 if _STATIC_DIR.exists():
@@ -95,6 +148,7 @@ def _append_log(job: JobState, message: str):
     line = f"{datetime.utcnow().isoformat()}Z {message}"
     job.logs.append(line)
     logger.info("[job:%s] %s", job.id, message)
+    _save_jobs_to_disk()
 
 
 def _track_test_status(job: JobState, message: str):
@@ -269,6 +323,7 @@ async def api_start_scan(req: ScanRequest):
         },
     )
     JOBS[job_id] = job
+    _save_jobs_to_disk()
     asyncio.create_task(_run_job(job, config))
 
     return {
@@ -375,6 +430,7 @@ async def start_scan(
         },
     )
     JOBS[job_id] = job
+    _save_jobs_to_disk()
     asyncio.create_task(_run_job(job, config))
 
     return {"job_id": job_id, "status_url": f"/jobs/{job_id}", "logs_url": f"/jobs/{job_id}/logs"}
