@@ -162,7 +162,7 @@ export async function renderScanProgress(container, jobId, signal) {
       <div class="card mb-4">
         <div class="card-header">
           <div class="card-title">Scan Progress</div>
-          <span class="text-muted text-sm">${done} / ${total} tests &middot; ${pct}%</span>
+          <span class="text-muted text-sm" id="scanProgressSummary">${done} / ${total} tests &middot; ${pct}%</span>
         </div>
         <div class="progress-bar" style="margin-bottom:20px">
           <div class="progress-fill animated" style="width:${pct}%"></div>
@@ -348,6 +348,9 @@ export async function renderScanProgress(container, jobId, signal) {
     const pct = total > 0 ? Math.round((done / total) * 100) : 0;
     const fill = document.querySelector('.progress-fill');
     if (fill) fill.style.width = `${pct}%`;
+
+    const summary = document.getElementById('scanProgressSummary');
+    if (summary) summary.innerHTML = `${done} / ${total} tests &middot; ${pct}%`;
   }
 
   function renderCompleted(job) {
