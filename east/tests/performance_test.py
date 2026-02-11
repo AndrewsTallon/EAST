@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 import shlex
 from typing import Any
 
@@ -83,6 +84,7 @@ class PerformanceTestRunner(TestRunner):
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, timeout=240, env=run_env)
         except Exception as exc:
+            self._safe_cleanup(output_path)
             return self._create_error_result(
                 f"Lighthouse failed to start: {exc}. {self._format_diagnostics(diag, cmd)}"
             )
@@ -91,23 +93,31 @@ class PerformanceTestRunner(TestRunner):
             payload = self._try_load_output_payload(output_path)
             err = proc.stderr.strip() or proc.stdout.strip() or "Unknown lighthouse error"
             if payload and self._is_cleanup_eperm(err):
-                LOGGER.warning(
-                    "Lighthouse cleanup failed with EPERM during temporary dir destroy, "
-                    "but JSON results were captured at %s.",
+                # Known Windows file-lock issue — results are captured, cleanup
+                # is cosmetic.  Log at DEBUG to avoid cluttering output.
+                LOGGER.debug(
+                    "Lighthouse EPERM during temp dir cleanup (Windows file lock) — "
+                    "results captured successfully at %s.",
                     output_path,
                 )
-                return self._parse_lighthouse_result(payload, source="Lighthouse Local")
+                result = self._parse_lighthouse_result(payload, source="Lighthouse Local")
+                self._safe_cleanup(output_path)
+                return result
 
+            self._safe_cleanup(output_path)
             return self._create_error_result(f"Lighthouse failed: {err}. {self._format_diagnostics(diag, cmd)}")
 
         payload = self._try_load_output_payload(output_path)
         if payload is None:
+            self._safe_cleanup(output_path)
             return self._create_error_result(
                 "Lighthouse did not produce output JSON. Ensure Chrome/Chromium is installed and runnable. "
                 f"{self._format_diagnostics(diag, cmd)}"
             )
 
-        return self._parse_lighthouse_result(payload, source="Lighthouse Local")
+        result = self._parse_lighthouse_result(payload, source="Lighthouse Local")
+        self._safe_cleanup(output_path)
+        return result
 
     def _build_lighthouse_command(self, output_path: str) -> tuple[list[str], dict[str, Any]]:
         """Build cross-platform Lighthouse command with executable resolution."""
@@ -175,12 +185,23 @@ class PerformanceTestRunner(TestRunner):
         )
 
     def _prepare_profile_dir(self) -> str:
-        """Create a stable Chrome profile directory for Lighthouse runs."""
+        """Create a unique Chrome profile directory for this Lighthouse run.
+
+        Uses PID + monotonic timestamp to avoid collisions across concurrent
+        runs for the same domain.
+        """
+        unique_suffix = f"{os.getpid()}_{int(time.monotonic() * 1000)}"
         if os.name == "nt":
             localappdata = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-            base_dir = ntpath.join(localappdata, "EAST", "lighthouse_profiles", self.domain)
+            base_dir = ntpath.join(
+                localappdata, "EAST", "lighthouse_profiles",
+                f"{self.domain}_{unique_suffix}",
+            )
         else:
-            base_dir = os.path.join(tempfile.gettempdir(), "east", "lighthouse_profiles", self.domain)
+            base_dir = os.path.join(
+                tempfile.gettempdir(), "east", "lighthouse_profiles",
+                f"{self.domain}_{unique_suffix}",
+            )
 
         cache_dir = os.path.join(base_dir, "cache")
         os.makedirs(cache_dir, exist_ok=True)
@@ -200,6 +221,40 @@ class PerformanceTestRunner(TestRunner):
     def _is_cleanup_eperm(error_text: str) -> bool:
         lowered = error_text.lower()
         return "eperm" in lowered and "destroytmp" in lowered
+
+    @staticmethod
+    def _safe_cleanup(path: str) -> None:
+        """Try to remove *path* with delayed retries for Windows file locks.
+
+        Retries after 0.5s and 2s if the initial delete fails with a
+        permission error.  Failures are logged at DEBUG level — cleanup is
+        cosmetic and must never affect scan results.
+        """
+        if not path or not os.path.exists(path):
+            return
+        delays = [0, 0.5, 2.0]
+        for i, delay in enumerate(delays):
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.unlink(path)
+                return
+            except PermissionError:
+                LOGGER.debug(
+                    "Cleanup attempt %d/%d for %s failed (EPERM) — will %s.",
+                    i + 1, len(delays), path,
+                    "retry" if i < len(delays) - 1 else "give up",
+                )
+            except OSError as exc:
+                LOGGER.debug("Cleanup of %s failed: %s — ignoring.", path, exc)
+                return
+        LOGGER.debug(
+            "Could not clean up %s after %d attempts — leaving for manual cleanup.",
+            path, len(delays),
+        )
 
     @staticmethod
     def _try_load_output_payload(output_path: str) -> dict[str, Any] | None:

@@ -11,6 +11,7 @@ import requests
 from east.tests.base import TestRunner, TestResult
 from east.visuals.badges import create_grade_badge, create_status_badge
 from east.utils.http import get_json
+from east.utils.cache import get_cached, set_cached
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +19,10 @@ CRT_SH_URL = "https://crt.sh/"
 
 # crt.sh query parameters — exclude expired certs, request JSON output
 CRT_SH_PARAMS_TEMPLATE = {"exclude": "expired", "output": "json"}
+
+# Local cache for crt.sh responses (24 hours)
+CRTSH_CACHE_SERVICE = "crtsh"
+CRTSH_CACHE_MAX_AGE = 86400  # 24 hours
 
 RESOLVER_TIMEOUT = 5
 RESOLVER_LIFETIME = 10
@@ -51,8 +56,8 @@ class SubdomainTestRunner(TestRunner):
     def run(self) -> TestResult:
         """Execute subdomain enumeration."""
         try:
-            # Certificate Transparency search
-            ct_subdomains = self._search_certificate_transparency()
+            # Certificate Transparency search (non-fatal — crt.sh may be down)
+            ct_subdomains, crtsh_status = self._search_certificate_transparency()
 
             # DNS brute force for common subdomains
             dns_subdomains = self._dns_brute_force()
@@ -63,29 +68,58 @@ class SubdomainTestRunner(TestRunner):
             # Resolve subdomains to IPs
             resolved = self._resolve_subdomains(all_subdomains)
 
-            return self._build_result(all_subdomains, resolved, ct_subdomains, dns_subdomains)
+            return self._build_result(
+                all_subdomains, resolved, ct_subdomains, dns_subdomains,
+                crtsh_status=crtsh_status,
+            )
 
         except Exception as e:
             logger.exception("Subdomain test failed for %s", self.domain)
             return self._create_error_result(str(e))
 
-    def _search_certificate_transparency(self) -> list[str]:
-        """Search Certificate Transparency logs via crt.sh."""
-        subdomains = set()
+    def _search_certificate_transparency(self) -> tuple[list[str], str]:
+        """Search Certificate Transparency logs via crt.sh.
 
+        Returns a tuple of (subdomains_list, status_string).  The status is
+        one of ``"ok"``, ``"cached"``, or ``"unavailable"``.  When crt.sh is
+        unreachable, this method logs once and returns an empty list rather
+        than failing the entire scan.
+        """
+        subdomains: set[str] = set()
+
+        # ----- Check local cache first (24h) -----
+        cached = get_cached(CRTSH_CACHE_SERVICE, self.domain, max_age=CRTSH_CACHE_MAX_AGE)
+        if cached is not None and isinstance(cached, dict):
+            cached_subs = cached.get("subdomains", [])
+            self.logger.info(
+                "Using locally cached crt.sh result for %s (%d subdomains, < 24h old)",
+                self.domain, len(cached_subs),
+            )
+            return sorted(cached_subs), "cached"
+
+        # ----- Query crt.sh with crtsh_mode (short retries, non-fatal) -----
         try:
             params = dict(CRT_SH_PARAMS_TEMPLATE)
             params["q"] = f"%.{self.domain}"
             data = get_json(
                 CRT_SH_URL,
                 params=params,
-                timeout=30,
+                timeout=20,
                 retries=3,
                 no_retry_on_404=True,
-                jitter=True,
+                crtsh_mode=True,
             )
 
-            if data and isinstance(data, list):
+            if data is None:
+                # All retries exhausted or non-retryable error — log once, continue
+                self.logger.warning(
+                    "crt.sh unavailable for %s — CT log enumeration skipped. "
+                    "Scan continues with DNS brute force only.",
+                    self.domain,
+                )
+                return [], "unavailable"
+
+            if isinstance(data, list):
                 for entry in data:
                     name_value = entry.get("name_value", "")
                     # crt.sh may return multiple names separated by newlines
@@ -101,10 +135,26 @@ class SubdomainTestRunner(TestRunner):
                     "Found %d unique subdomains via CT logs for %s",
                     len(subdomains), self.domain,
                 )
-        except Exception as e:
-            self.logger.warning("CT log search failed for %s: %s", self.domain, e)
 
-        return sorted(subdomains)
+                # Persist to local cache
+                set_cached(CRTSH_CACHE_SERVICE, self.domain, {
+                    "subdomains": sorted(subdomains),
+                })
+            else:
+                self.logger.warning(
+                    "crt.sh returned unexpected data type for %s — skipping CT enumeration.",
+                    self.domain,
+                )
+                return [], "unavailable"
+
+        except Exception as e:
+            self.logger.warning(
+                "CT log search failed for %s: %s — scan continues without CT data.",
+                self.domain, e,
+            )
+            return [], "unavailable"
+
+        return sorted(subdomains), "ok"
 
     def _dns_brute_force(self) -> list[str]:
         """Check for common subdomain names via DNS resolution."""
@@ -146,6 +196,8 @@ class SubdomainTestRunner(TestRunner):
         resolved: dict[str, str],
         ct_subdomains: list[str],
         dns_subdomains: list[str],
+        *,
+        crtsh_status: str = "ok",
     ) -> TestResult:
         """Build a TestResult from subdomain enumeration."""
         count = len(all_subdomains)
@@ -246,6 +298,7 @@ class SubdomainTestRunner(TestRunner):
                 "total_count": count,
                 "ct_count": len(ct_subdomains),
                 "dns_count": len(dns_subdomains),
+                "crtsh_status": crtsh_status,
                 "subdomains": all_subdomains,
                 "resolved": resolved,
             },

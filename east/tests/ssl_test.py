@@ -37,6 +37,12 @@ POLL_INTERVAL = 15  # seconds — SSL Labs scans take minutes; no point hammerin
 CACHE_SERVICE = "ssllabs"
 CACHE_MAX_AGE = 86400  # 24 hours
 
+# API v4 cache: maxAge is specified in hours
+API_CACHE_MAX_AGE_HOURS = 24
+
+# User-Agent identifying EAST to SSL Labs
+SSLLABS_USER_AGENT = "EAST-Scanner/1.0 (External Attack Surface Test)"
+
 REGISTRATION_HELP = (
     "SSL Labs API v4 requires a registered email address.\n"
     "  1. Install the ssllabs-scan reference client.\n"
@@ -85,9 +91,12 @@ class SSLLabsTestRunner(TestRunner):
           - other 5xx → standard backoff with jitter, max 5 attempts
 
         The registered *email* is sent as an HTTP header (required by API v4)
-        rather than as a query parameter.
+        rather than as a query parameter.  A descriptive User-Agent is also
+        sent per v4 identification requirements.
         """
-        headers = {"email": self.email} if self.email else None
+        headers = {"User-Agent": SSLLABS_USER_AGENT}
+        if self.email:
+            headers["email"] = self.email
         return get_json(
             ANALYZE_ENDPOINT,
             params=params,
@@ -116,6 +125,11 @@ class SSLLabsTestRunner(TestRunner):
             if status == "READY":
                 self.logger.info(
                     "Using locally cached SSL Labs result for %s (< 24h old)",
+                    self.domain,
+                )
+                self.logger.info(
+                    "SSL Labs cache diagnostic for %s: local_cache=hit | "
+                    "api_cache_request=skipped | startNew_triggered=False",
                     self.domain,
                 )
                 return self._parse_results(cached)
@@ -158,9 +172,9 @@ class SSLLabsTestRunner(TestRunner):
         """Either fetch cached results or kick off a new assessment.
 
         Cache-first flow (``use_cache=True``):
-          1. ``GET /analyze?host=<domain>&publish=off&all=done`` — no
-             ``startNew``, no ``fromCache``.  The API returns the most recent
-             cached assessment if one exists.
+          1. ``GET /analyze?host=<domain>&fromCache=on&maxAge=24&…`` — ask the
+             API for a cached assessment no older than *maxAge* hours (v4 API
+             semantics).
           2. If status is ``READY`` or still in progress (``DNS`` /
              ``IN_PROGRESS``), return immediately for the caller to handle.
           3. Only issue ``startNew=on`` when the status is ``ERROR`` or no
@@ -172,43 +186,80 @@ class SSLLabsTestRunner(TestRunner):
           - Start a fresh assessment immediately (``startNew=on``).
           - If that fails with overload (529 etc.), still fall back to
             polling the existing assessment.
+
+        Structured diagnostics are logged once per domain to aid debugging
+        of cache hit/miss patterns.
         """
+        # Diagnostics dict — logged once at the end of this method
+        diag: dict[str, Any] = {
+            "domain": self.domain,
+            "local_cache": "miss",
+            "api_cache_request": None,
+            "api_cache_result": None,
+            "startNew_triggered": False,
+            "api_params": None,
+            "response_status": None,
+            "assessment_status": None,
+        }
+
         if use_cache:
             self.logger.info(
-                "Requesting cached SSL Labs results for %s", self.domain,
+                "Requesting cached SSL Labs results for %s (fromCache=on, maxAge=%dh)",
+                self.domain, API_CACHE_MAX_AGE_HOURS,
             )
-            data = self._ssllabs_get({
+            cache_params = {
                 "host": self.domain,
+                "fromCache": "on",
+                "maxAge": str(API_CACHE_MAX_AGE_HOURS),
                 "publish": "off",
                 "all": "done",
-            })
+            }
+            diag["api_cache_request"] = f"fromCache=on, maxAge={API_CACHE_MAX_AGE_HOURS}"
+            diag["api_params"] = {k: v for k, v in cache_params.items()}
+            data = self._ssllabs_get(cache_params)
 
             if data is not None:
                 status = data.get("status")
+                diag["assessment_status"] = status
                 # Cached result ready — return immediately.
                 if status == "READY":
+                    diag["api_cache_result"] = "hit"
+                    self._log_diagnostics(diag)
                     return data
                 # Assessment still running — let the caller poll.
                 if status in ("DNS", "IN_PROGRESS"):
+                    diag["api_cache_result"] = "in_progress"
+                    self._log_diagnostics(diag)
                     return data
                 # API-level errors (e.g. bad host) — let the caller handle.
                 if "errors" in data:
+                    diag["api_cache_result"] = "error"
+                    self._log_diagnostics(diag)
                     return data
+                diag["api_cache_result"] = f"unusable (status={status})"
+            else:
+                diag["api_cache_result"] = "no_response"
 
             # No usable cached data or status was ERROR — start a new scan.
             self.logger.info(
-                "No usable cache — starting new SSL Labs scan for %s",
+                "No usable API cache — starting new SSL Labs scan for %s",
                 self.domain,
             )
 
         # Start a fresh assessment.
         self.logger.info("Starting new SSL Labs assessment for %s", self.domain)
-        data = self._ssllabs_get({
+        diag["startNew_triggered"] = True
+        start_params = {
             "host": self.domain,
             "startNew": "on",
             "publish": "off",
             "all": "done",
-        })
+        }
+        diag["api_params"] = {k: v for k, v in start_params.items()}
+        data = self._ssllabs_get(start_params)
+
+        if data is not None:
+            diag["assessment_status"] = data.get("status")
 
         # If startNew failed (e.g. 529 after all retries), fall back to
         # polling whatever the API already has for this host.
@@ -217,13 +268,33 @@ class SSLLabsTestRunner(TestRunner):
                 "startNew failed for %s — falling back to cache polling",
                 self.domain,
             )
-            data = self._ssllabs_get({
+            fallback_params = {
                 "host": self.domain,
+                "fromCache": "on",
                 "publish": "off",
                 "all": "done",
-            })
+            }
+            data = self._ssllabs_get(fallback_params)
+            if data is not None:
+                diag["assessment_status"] = data.get("status")
 
+        self._log_diagnostics(diag)
         return data
+
+    def _log_diagnostics(self, diag: dict[str, Any]) -> None:
+        """Log structured SSL Labs cache diagnostics (once per domain)."""
+        self.logger.info(
+            "SSL Labs cache diagnostic for %s: "
+            "local_cache=%s | api_cache_request=%s | api_cache_result=%s | "
+            "startNew_triggered=%s | assessment_status=%s | params=%s",
+            diag.get("domain"),
+            diag.get("local_cache"),
+            diag.get("api_cache_request"),
+            diag.get("api_cache_result"),
+            diag.get("startNew_triggered"),
+            diag.get("assessment_status"),
+            diag.get("api_params"),
+        )
 
     def _poll_for_results(self, data: dict) -> Optional[dict]:
         """Poll the SSL Labs API until analysis is complete.

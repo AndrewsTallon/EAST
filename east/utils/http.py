@@ -52,6 +52,12 @@ RATE_LIMIT_STATUSES = {429, 529}
 STANDARD_BACKOFF = [2, 4, 8, 16, 32]
 RATE_LIMIT_BACKOFF = [5, 15, 45]
 
+# ---------------------------------------------------------------------------
+# crt.sh–specific retry policy — short retries, never minutes-long waits
+# ---------------------------------------------------------------------------
+CRTSH_BACKOFF = [2, 6, 15]
+CRTSH_MAX_ATTEMPTS = 3
+
 
 # ---------------------------------------------------------------------------
 # Per-host rate limiter
@@ -180,6 +186,7 @@ def make_request(
     overload_backoff_schedule: Optional[list[int]] = None,
     jitter: bool = False,
     ssllabs_mode: bool = False,
+    crtsh_mode: bool = False,
     no_retry_on_404: bool = False,
 ) -> Optional[requests.Response]:
     """Make an HTTP request with retry logic and exponential backoff.
@@ -191,6 +198,12 @@ def make_request(
       - 503 (unavailable): sleep 15 min, retry **once**.
       - 429 (rate limited): exponential backoff 30s→10min with jitter.
       - Other 5xx: standard backoff with jitter, max 5 attempts.
+
+    **crtsh_mode=True** (per crt.sh reliability profile):
+      - Max 3 attempts with short backoff [2, 6, 15]s + jitter.
+      - 400/404: no retry (malformed request).
+      - 502/503/504/timeout: retry per schedule.
+      - Never waits more than ~22s per single backoff.
 
     **ssllabs_mode=False** (generic):
       - *overload_statuses* (default 429/529): retry with overload backoff.
@@ -205,8 +218,18 @@ def make_request(
     effective_std_backoff = standard_backoff_schedule or STANDARD_BACKOFF
     effective_ol_backoff = overload_backoff_schedule or RATE_LIMIT_BACKOFF
 
-    # In ssllabs_mode the retry count is governed per-status (not the caller's value)
-    max_attempts = (retries + 1) if not ssllabs_mode else max(retries + 1, 5)
+    # Per-service retry policies
+    if crtsh_mode:
+        # crt.sh: short retries, never minutes-long waits
+        max_attempts = min(retries + 1, CRTSH_MAX_ATTEMPTS)
+        effective_std_backoff = CRTSH_BACKOFF
+        effective_ol_backoff = CRTSH_BACKOFF
+        jitter = True
+    elif ssllabs_mode:
+        # SSL Labs: retry count governed per-status (not the caller's value)
+        max_attempts = max(retries + 1, 5)
+    else:
+        max_attempts = retries + 1
 
     merged_headers = dict(DEFAULT_HEADERS)
     if headers:
